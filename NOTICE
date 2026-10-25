@@ -1,0 +1,25 @@
+dsh-reme-lite
+Copyright 2026 armstronger
+https://github.com/Nobodyanonymou-s/dsh-reme-lite
+
+This project borrows its design from ReMe (https://github.com/agentscope-ai/ReMe),
+Copyright 2024-2026 Alibaba Group, Apache-2.0.
+
+What was taken, precisely:
+
+  * The memory model: a local Markdown workspace, `daily/` refined into `digest/`,
+    with the workspace itself as the single source of truth.
+  * The lifecycle vocabulary: auto memory, dream/consolidation, daily and digest.
+  * The retrieval shape: BM25 over the workspace plus bounded wikilink expansion,
+    returned as line-ranged evidence rather than prose.
+  * The rule that retrieved memory is evidence, not instructions.
+
+No source code from ReMe is included. The implementation is independent: it runs
+inside the DeepSeek Harness Host process and has no Python dependency.
+
+DeepSeek Harness (https://github.com/deepseek-ai/deepseek-harness) is MIT licensed.
+Two small helpers in `src/plugin.js` — `createUserMessage` and `defineTool` — are
+reproduced from `@deepseek-ai/dsh-llm` and `@deepseek-ai/dsh-tools` respectively,
+so that the plugin needs no runtime import of Harness packages. They are marked as
+such in the source and are used under the Harness license. No other Harness source
+code is redistributed here.

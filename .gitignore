@@ -1,0 +1,15 @@
+# build output
+dist/
+*.tgz
+.npm-cache/
+
+# dependencies (the plugin itself has none)
+node_modules/
+
+# local memory workspaces, should you point one here while developing
+.memory/
+
+# editor / OS noise
+.DS_Store
+Thumbs.db
+*.log

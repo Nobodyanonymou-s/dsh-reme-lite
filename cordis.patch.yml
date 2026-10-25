@@ -1,0 +1,22 @@
+# Mounts the memory runtime in its own realm so its service cannot collide
+# with another memory provider (e.g. the official ReMe plugin).
+#
+# The row references the package BY NAME, as the packaging guide requires: the
+# bundle is installed into the profile's node_modules, which is what gives Node
+# a resolution root for the package's own imports.
+- insert:
+    - id: node-memory-scope
+      name: "@deepseek-ai/cordis-plugin-group"
+      group: true
+      isolate:
+        nodeMemory: true
+      config:
+        - id: node-memory
+          name: "dsh-reme-lite"
+          config:
+            dreamEnabled: false
+            dreamCron: "0 23 * * *"
+            dreamTimeZone: "Asia/Shanghai"
+            # auto = follow the system locale; zh/en override it. The settings
+            # dropdown writes this same key.
+            language: "auto"

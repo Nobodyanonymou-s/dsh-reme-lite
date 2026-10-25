@@ -1,0 +1,62 @@
+{
+  "name": "dsh-reme-lite",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "ReMe-shaped long-term memory for DSH: Markdown workspace, BM25 recall, turn capture, scheduled consolidation",
+  "author": {
+    "name": "armstronger",
+    "url": "https://github.com/Nobodyanonymou-s"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nobodyanonymou-s/dsh-reme-lite.git"
+  },
+  "homepage": "https://github.com/Nobodyanonymou-s/dsh-reme-lite#readme",
+  "bugs": {
+    "url": "https://github.com/Nobodyanonymou-s/dsh-reme-lite/issues"
+  },
+  "main": "./src/plugin.js",
+  "exports": {
+    ".": "./src/plugin.js",
+    "./client": "./client/client.js",
+    "./store": "./src/store.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "client",
+    "bin",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "test": "node --test --test-isolation=none test/*.test.js",
+    "demo": "node bin/memctl.js",
+    "pack": "npm pack --pack-destination ./dist"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "memory",
+    "reme"
+  ],
+  "license": "Apache-2.0"
+}
