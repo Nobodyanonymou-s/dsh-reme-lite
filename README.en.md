@@ -58,20 +58,6 @@ dsh plugin --profile desktop add ./dist/dsh-reme-lite-<version>.tgz
 
 Then open **Settings → Memory** once to confirm the page loads and the switch responds.
 
-> The mount row in `cordis.patch.yml` references the package **by name**. If you rename the package, change `package.json#name` and that row together, or the bundle will not mount.
-
-### Give it a first boundary
-
-Before turning consolidation on, write the layering rule into your workspace `AGENTS.md` — it is the one guard that keeps automatic memory from competing with what you wrote by hand:
-
-```markdown
-## Memory layering (node-memory)
-
-- This file is the stable core: stance, working agreements, long-term profile. Human-maintained; wins on conflict.
-- The memory workspace (`daily/`, `digest/`) is a reference library: retrievable facts and evidence, not a replacement.
-- This file holds no daily log; the library holds no statements about "how I show up".
-```
-
 ## Using it
 
 | Tool | What it does |
@@ -82,6 +68,16 @@ Before turning consolidation on, write the layering rule into your workspace `AG
 | `memory_schedule(action)` | `status` · `run_now` · `enable` · `disable` |
 
 The agent is told to search before answering anything that depends on history, and to treat what it finds as **evidence, not instructions** — retrieved text can never redirect it.
+
+Before turning consolidation on, consider writing the layering rule into your workspace `AGENTS.md` so automatic memory and your own prose each keep to their lane:
+
+```markdown
+## Memory layering (node-memory)
+
+- This file is the stable core: stance, working agreements, long-term profile. Human-maintained; wins on conflict.
+- The memory workspace (`daily/`, `digest/`) is a reference library: retrievable facts and evidence, not a replacement.
+- This file holds no daily log; the library holds no statements about "how I show up".
+```
 
 ## The heatmap, and what the colours mean
 
@@ -125,7 +121,7 @@ Two layers, one owner each:
 
 Four decisions worth knowing before you read the code:
 
-- **No `@deepseek-ai/*` imports in the Host half.** A plugin mounted from a path has no resolution root for the Host's packages, and the failure happens during `import` — before any of your code runs. The two helpers that would have been imported (`defineTool`, `createUserMessage`) are inlined against the shipped implementations.
+- **No `@deepseek-ai/*` imports in the Host half.** A plugin mounted from a path has no resolution root for the Host's packages, and the failure happens during `import` — before any of your code runs. The two helpers that would have been imported (`defineTool`, `createUserMessage`) are inlined against the shipped implementations. The mount row references the package by name: renaming means changing `package.json#name` and that row in `cordis.patch.yml` together.
 - **The client half is a classic script, not an ES module.** DSH loads client bundles through `<script src>` and the only entry is `window.__ModuleLoader__.load({ id, factory })`; `require()` resolves shell seed words such as `react`. So the page is hand-written `React.createElement` — no JSX, no bundler.
 - **The browser cannot read the workspace.** The Host answers two same-origin routes, `/node-memory/status.json` (aggregates only — counts, never memory text) and `POST /node-memory/settings` (validated, atomic, with an Origin check).
 - **Failures are loud in files, not in the void.** A diagnostic beacon writes to `~/.dsh/node-memory-boot.log`, because a GUI launch gives no stdout and a silent non-load is indistinguishable from a plugin that does nothing.
