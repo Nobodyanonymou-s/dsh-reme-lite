@@ -117,11 +117,14 @@ test("a fresh session gets guidance and binds a host reminder", async () => {
   const root = await workspace();
   const schedule = fakeSchedule();
   const { ctx } = makeCtx(schedule);
+  // `auto` follows the runner's locale; pin it so the assertions below mean
+  // the same thing wherever the suite runs.
   apply(ctx, {
     workspace: root,
     dreamEnabled: true,
     dreamCron: "0 23 * * *",
     dreamTimeZone: "Asia/Shanghai",
+    language: "zh",
   });
   await settle();
 
@@ -298,7 +301,7 @@ test("memory_schedule reports the switch and refuses to diverge from it", async 
 test("memory_dream delivers material and consumes queued requests", async () => {
   const root = await workspace();
   const { ctx, tools } = makeCtx(fakeSchedule());
-  apply(ctx, { workspace: root, dreamEnabled: false });
+  apply(ctx, { workspace: root, dreamEnabled: false, language: "zh" });
   await settle();
 
   const write = tools.find((tool) => tool.name === "memory_write");
@@ -386,4 +389,239 @@ test("working language follows the system unless pinned", () => {
   assert.equal(resolveLanguage("auto", { LC_ALL: "zh_CN.UTF-8" }), "zh");
   assert.equal(resolveLanguage("auto", { LANG: "en_US.UTF-8" }), "en");
   assert.equal(resolveLanguage(undefined, { LC_ALL: "zh_CN.UTF-8" }), "zh");
+});
+
+test("a new session takes the reminder over from the session that enabled it", async () => {
+  const root = await workspace();
+  const schedule = fakeSchedule([
+    {
+      id: "schedule-old",
+      sessionId: "session-old",
+      title: "记忆整理",
+      prompt: "[[node-memory:dream]] x",
+      lastDelivery: { scheduledAt: "2026-10-27T15:00:00.000Z", deliveredAt: "2026-10-27T15:00:00.054Z", messageId: "m" },
+    },
+  ]);
+  const { ctx } = makeCtx(schedule);
+  apply(ctx, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *", dreamTimeZone: "Asia/Shanghai" });
+  await settle();
+
+  // A reminder left on the old session is invisible from here: the Host only
+  // delivers into the bound session. It must move to the session in use.
+  ctx.emit("agent/created", { agent: fakeAgent("session-new", []) });
+  await settle();
+
+  assert.equal(schedule.creates.length, 1, "one reminder is bound to the new session");
+  assert.equal(schedule.creates[0].sessionId, "session-new");
+  assert.deepEqual(schedule.rows.map((row) => row.sessionId), ["session-new"], "the old row is gone");
+  assert.deepEqual(schedule.deletes, [{ sessionId: "session-old", id: "schedule-old" }]);
+
+  // Re-entering the same session must not churn the delivery arm.
+  ctx.emit("agent/created", { agent: fakeAgent("session-new", []) });
+  await settle();
+  assert.equal(schedule.creates.length, 1);
+  assert.equal(schedule.deletes.length, 1);
+});
+
+test("the move keeps the old row when binding fails", async () => {
+  const root = await workspace();
+  const schedule = fakeSchedule([
+    { id: "schedule-old", sessionId: "session-old", title: "记忆整理", prompt: "[[node-memory:dream]] x" },
+  ]);
+  schedule.create = async () => {
+    throw new Error("host refused");
+  };
+  const { ctx } = makeCtx(schedule);
+  apply(ctx, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *" });
+  await settle();
+
+  ctx.emit("agent/created", { agent: fakeAgent("session-new", []) });
+  await settle();
+
+  assert.equal(schedule.deletes.length, 0, "no delivery arm is lost when the new one cannot be created");
+  assert.deepEqual(schedule.rows.map((row) => row.id), ["schedule-old"]);
+});
+
+test("memory_dream records the scheduled occurrence it was asked to run", async () => {
+  const root = await workspace();
+  await mkdir(join(root, "metadata"), { recursive: true });
+  await writeFile(
+    join(root, "metadata", "dream-task.json"),
+    JSON.stringify({
+      id: "dream",
+      enabled: true,
+      cron: "0 23 * * *",
+      timeZone: "Asia/Shanghai",
+      createdAt: "2026-10-20T00:00:00.000Z",
+      updatedAt: "2026-10-20T00:00:00.000Z",
+      runs: [],
+      lastRunAt: null,
+      nextRunAt: "2026-10-29T15:00:00.000Z",
+    }),
+    "utf8",
+  );
+
+  const { ctx, tools } = makeCtx(fakeSchedule());
+  apply(ctx, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *", dreamTimeZone: "Asia/Shanghai" });
+  await settle();
+
+  const reminder = {
+    type: "user/message",
+    time: Date.parse("2026-10-28T15:00:00.227Z"),
+    data: {
+      source: { kind: "schedule" },
+      content: [
+        {
+          type: "text",
+          text: '[SCHEDULE REMINDER BATCH]\nThis is a scheduled message from the user\nreminders_json: [{"schedule_id":"s","occurrence_at":"2026-10-28T15:00:00.000Z","reminder_prompt":"[[node-memory:dream]]\\n定时记忆整理时间到了。"}]',
+        },
+      ],
+    },
+  };
+  const agent = { session: { id: "session-7", header: { id: "session-7" }, events: [reminder] }, inbox: { nextStep: [] }, inject() {} };
+
+  const dream = tools.find((item) => item.name === "memory_dream");
+  await dream.execute({}, { agent });
+
+  const state = JSON.parse(await readFile(join(root, "metadata", "dream-task.json"), "utf8"));
+  assert.equal(state.lastStatus, "ok");
+  assert.equal(state.runs.length, 1);
+  assert.equal(state.runs[0].status, "ok");
+  assert.match(state.runs[0].detail, /2026-10-28T15:00:00\.000Z/);
+  assert.equal(state.nextRunAt, "2026-10-29T15:00:00.000Z", "the next run follows the occurrence, not the call");
+  assert.ok(state.lastRunAt, "the run is timestamped");
+
+  // A manual dream in a session with no reminder must not fake a run.
+  await dream.execute({}, { agent: { session: { id: "session-8", events: [] }, inbox: { nextStep: [] } } });
+  const after = JSON.parse(await readFile(join(root, "metadata", "dream-task.json"), "utf8"));
+  assert.equal(after.runs.length, 1);
+});
+
+test("status says where the reminder is bound and when it last fired", async () => {
+  const root = await workspace();
+  const schedule = fakeSchedule([
+    {
+      id: "schedule-1",
+      sessionId: "session-4",
+      title: "记忆整理",
+      prompt: "[[node-memory:dream]]",
+      lastDelivery: {
+        scheduledAt: "2026-10-28T15:00:00.000Z",
+        deliveredAt: "2026-10-28T15:00:00.194Z",
+        messageId: "m",
+      },
+    },
+  ]);
+  const { ctx, tools } = makeCtx(schedule);
+  apply(ctx, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *" });
+  await settle();
+
+  const agent = fakeAgent("session-4", []);
+  ctx.emit("agent/created", { agent });
+  await settle();
+
+  const status = await tools.find((item) => item.name === "memory_schedule").execute({ action: "status" }, { agent });
+  assert.match(status, /session 4 \(this session\)/, "the bound session is short and marked as this one");
+  assert.match(status, /delivered 2026-10-28T15:00:00\.194Z/);
+});
+
+test("memory_write dates the node so it shows on the heatmap", async () => {
+  const root = await workspace();
+  const { ctx, tools } = makeCtx(fakeSchedule());
+  apply(ctx, { workspace: root, dreamEnabled: false });
+  await settle();
+
+  const write = tools.find((item) => item.name === "memory_write");
+  await write.execute({ path: "digest/wiki/dated.md", content: "# dated", kind: "conflict" }, {});
+
+  const text = await readFile(join(root, "digest/wiki/dated.md"), "utf8");
+  assert.match(text, /^---\n/);
+  assert.match(text, /updated: \d{4}-\d{2}-\d{2}\n/, "a digest path has no date of its own");
+  assert.match(text, /kind: conflict/);
+});
+
+test("an occurrence without a timestamp falls back to the event time", async () => {
+  const root = await workspace();
+  await mkdir(join(root, "metadata"), { recursive: true });
+  await writeFile(
+    join(root, "metadata", "dream-task.json"),
+    JSON.stringify({
+      id: "dream",
+      enabled: true,
+      cron: "0 23 * * *",
+      timeZone: "Asia/Shanghai",
+      createdAt: "2026-10-20T00:00:00.000Z",
+      updatedAt: "2026-10-20T00:00:00.000Z",
+      runs: [],
+      lastRunAt: null,
+    }),
+    "utf8",
+  );
+  const { ctx, tools } = makeCtx(fakeSchedule());
+  apply(ctx, { workspace: root, dreamEnabled: false });
+  await settle();
+
+  // The occurrence instant normally rides in reminders_json; an older Host
+  // build omitted it. The delivery event still happened at a known time.
+  const reminder = {
+    type: "user/message",
+    time: Date.parse("2026-10-28T15:00:00.900Z"),
+    data: {
+      source: { kind: "schedule" },
+      content: [
+        {
+          type: "text",
+          text: '[SCHEDULE REMINDER BATCH]\nreminders_json: [{"schedule_id":"s","reminder_prompt":"[[node-memory:dream]]\\n整理。"}]',
+        },
+      ],
+    },
+  };
+  const agent = { session: { id: "session-9", header: { id: "session-9" }, events: [reminder] }, inbox: { nextStep: [] }, inject() {} };
+  await tools.find((item) => item.name === "memory_dream").execute({}, { agent });
+
+  const state = JSON.parse(await readFile(join(root, "metadata", "dream-task.json"), "utf8"));
+  assert.equal(state.runs.length, 1, "the run is still recorded");
+  assert.match(state.runs[0].detail, /2026-10-28T15:00:00\.900Z/, "the event time stands in");
+});
+
+test("a stale row that fails to delete does not block the others", async () => {
+  const root = await workspace();
+  const schedule = fakeSchedule([
+    { id: "schedule-stuck", sessionId: "session-stuck", title: "记忆整理", prompt: "[[node-memory:dream]] x" },
+    { id: "schedule-loose", sessionId: "session-loose", title: "记忆整理", prompt: "[[node-memory:dream]] x" },
+  ]);
+  const realDelete = schedule.delete;
+  schedule.delete = async (args) => {
+    if (args.id === "schedule-stuck") throw new Error("host wedged");
+    return realDelete(args);
+  };
+  const { ctx } = makeCtx(schedule);
+  apply(ctx, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *" });
+  await settle();
+
+  ctx.emit("agent/created", { agent: fakeAgent("session-new", []) });
+  await settle();
+
+  assert.deepEqual(
+    schedule.rows.map((row) => row.id).sort(),
+    ["schedule-1", "schedule-stuck"],
+    "the loose row is gone; the new binding and the wedged row remain",
+  );
+});
+
+test("the consumed note follows the pinned language", async () => {
+  const root = await workspace();
+  const { ctx, tools } = makeCtx(fakeSchedule());
+  apply(ctx, { workspace: root, dreamEnabled: false, language: "en" });
+  await settle();
+
+  await mkdir(join(root, "metadata", "dream-queue"), { recursive: true });
+  await writeFile(
+    join(root, "metadata", "dream-queue", "2026-10-25T00-00-00-000Z-abcd.json"),
+    JSON.stringify({ id: "2026-10-25T00-00-00-000Z-abcd", createdAt: "2026-10-25T00:00:00.000Z", reason: "timer", material: "stale" }),
+    "utf8",
+  );
+
+  const material = await tools.find((item) => item.name === "memory_dream").execute({}, {});
+  assert.match(material, /\(1 pending consolidation request\(s\) consumed\.\)/);
 });

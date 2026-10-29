@@ -180,7 +180,7 @@ export function linkKey(value) {
 
 /**
  * Render a memory node with frontmatter.
- * @param {{ name?: string, description?: string, tags?: string[], kind?: string }} meta
+ * @param {{ name?: string, description?: string, updated?: string, tags?: string[], kind?: string }} meta
  * @param {string} body
  * @returns {string}
  */
@@ -188,6 +188,9 @@ export function renderNode(meta, body) {
   const fields = ["---"];
   if (meta.name) fields.push(`name: ${meta.name}`);
   if (meta.description) fields.push(`description: ${meta.description}`);
+  // `updated` dates the node for the heatmap: digest paths carry no date, so
+  // without it a node is invisible on the calendar.
+  if (meta.updated) fields.push(`updated: ${meta.updated}`);
   if (meta.tags?.length) fields.push(`tags: ${meta.tags.join(", ")}`);
   // `kind` drives the heatmap colour; written only when it is not the default.
   if (meta.kind && meta.kind !== "normal") fields.push(`kind: ${meta.kind}`);

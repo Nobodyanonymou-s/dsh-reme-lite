@@ -35,8 +35,8 @@ This project makes a different trade. It keeps ReMe's *shape* and drops the proc
 
 - **A workspace of plain Markdown** — `daily/` for the day's record, `digest/{personal,procedure,wiki}/` for durable knowledge, `session/dialog/` for raw turns, `metadata/` for rebuildable indexes. Your editor, `grep`, and `git` all work on it.
 - **`memory_search`** — BM25 over Chinese and English, with one-hop `[[wikilink]]` expansion, returning `path:line-range` evidence rather than a wall of text.
-- **Turn capture without a model** — completed turns are appended to the workspace as they happen; the daily page keeps a bounded excerpt block that never overwrites your own prose.
-- **Scheduled consolidation, switchable** — turning it on creates a durable Host reminder; turning it off pauses and keeps the history. When it fires, the agent consolidates with `memory_write`.
+- **Turn capture without a model** — completed turns are appended to the workspace as they happen; the daily page keeps a bounded excerpt block that never overwrites your own prose. When several sessions share a day, their excerpts are merged in time order with every contributor listed at the end of the block — none of them erases the others.
+- **Scheduled consolidation, switchable** — turning it on creates a durable Host reminder; turning it off pauses and keeps the history. When it fires, the agent consolidates with `memory_write`. The reminder is **session-scoped**: opening a new session moves it there, and only the bound session receives it; each reminder-driven run is recorded in the task history (the settings page's "last consolidation").
 - **A settings page with a heatmap** — 26 weeks of memory activity, coloured by what kind of memory it was (see below).
 
 ## Requirements
@@ -133,7 +133,7 @@ Four decisions worth knowing before you read the code:
 ## Known limits
 
 - No embeddings. BM25 and links only — good enough for a personal corpus, not a search engine.
-- Scheduled consolidation only runs when a session receives the reminder; if no session is open at the scheduled time, the Host delivers it when one resumes.
+- Scheduled consolidation depends on a session receiving the reminder: the reminder is bound to one session, and the plugin moves it when a new session opens; if no session is running at the scheduled time, the Host delivers it when one resumes. What counts as "ran" is the reminder in the session history — `memory_dream` back-fills the run record when it is called, so "a task exists" and "it has run" are two different facts in the status.
 - No resource ingestion (PDFs, images), no Studio, no MCP server. ReMe has all three.
 - One workspace; no multi-agent sharing or isolation yet.
 - Not published to npm. Tarball install only, for now.

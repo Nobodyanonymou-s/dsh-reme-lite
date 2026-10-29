@@ -12,9 +12,10 @@
  *   conflict      red     contradicts something already recorded
  */
 
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
+import { dateKey } from "./capture.js";
 import { parseFrontmatter } from "./markdown.js";
 
 /** @typedef {"normal" | "notable" | "user-declared" | "conflict"} MemoryKind */
@@ -47,8 +48,14 @@ async function collect(root) {
       // The date comes from the path when the workspace is organized by day,
       // otherwise from frontmatter — a digest node is dated when it was written.
       const fromPath = /(\d{4}-\d{2}-\d{2})/.exec(relPath);
-      const date = fromPath ? fromPath[1] : String(data.updated ?? data.date ?? "").slice(0, 10);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+      let date = fromPath ? fromPath[1] : String(data.updated ?? data.date ?? "").slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        // Nodes written before `updated` existed still belong on the calendar:
+        // the write time is their date.
+        const info = await stat(absolute).catch(() => null);
+        if (info === null) continue;
+        date = dateKey(info.mtime);
+      }
       out.push({ relPath, kind: normalizeKind(data.kind), date });
     }
   }

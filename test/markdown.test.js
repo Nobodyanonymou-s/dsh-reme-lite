@@ -63,7 +63,9 @@ test("frontmatter name becomes the heading when the body has none", () => {
 });
 
 test("renderNode emits frontmatter then body", () => {
-  const text = renderNode({ name: "n", description: "d" }, "# body");
-  assert.ok(text.startsWith("---\nname: n\ndescription: d\n---\n\n# body"));
+  const text = renderNode({ name: "n", description: "d", updated: "2026-10-28" }, "# body");
+  assert.ok(text.startsWith("---\nname: n\ndescription: d\nupdated: 2026-10-28\n---\n\n# body"));
   assert.ok(text.endsWith("\n"));
+  const bare = renderNode({ name: "n" }, "# body");
+  assert.ok(!bare.includes("updated:"), "no date is invented when the caller has none");
 });

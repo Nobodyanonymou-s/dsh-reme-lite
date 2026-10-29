@@ -22,7 +22,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 
-import { Capture } from "./capture.js";
+import { Capture, dateKey } from "./capture.js";
 import { buildDreamMaterial, dreamPrompt } from "./dream.js";
 import { DreamQueue } from "./dream-queue.js";
 import { DEFAULT_CRON, DreamTaskStore } from "./dream-task.js";
@@ -478,8 +478,16 @@ async function reconcile(runtime, sessionId) {
     await tasks.enable({ cron: config.dreamCron, timeZone: config.dreamTimeZone });
   }
   if (rows === null) return; // no Host schedule: the local timer drives it
-  if (rows.some(isOurRow)) return;
-  if (sessionId) await bindHostReminder(runtime, sessionId);
+  if (!sessionId) return; // initial reconcile: no session to bind to yet
+  const ours = rows.filter(isOurRow);
+  if (ours.some((row) => row.sessionId === sessionId)) return;
+  // The Host delivers a reminder only into the session it is bound to. A
+  // reminder left on an older session keeps running there invisibly while the
+  // session in front of the user never sees it; move it to this one. Bind
+  // before deleting so a failed create cannot leave the switch on with no
+  // delivery arm at all.
+  const bound = await bindHostReminder(runtime, sessionId);
+  if (bound.bound) await removeHostRowsExcept(ctx, sessionId);
 }
 
 /**
@@ -697,6 +705,52 @@ function isOurRow(row) {
 let DREAM_TITLE_CACHE = "记忆整理";
 
 /**
+ * Latest occurrence of a scheduled consolidation reminder delivered into
+ * `session`. The Host delivers it as a user message whose source kind is
+ * `schedule`; the occurrence instant travels in the message text.
+ * @param {any} session
+ * @returns {string | null} ISO instant, or null when this session has none
+ */
+function scheduledDreamAt(session) {
+  const events = Array.isArray(session?.events) ? session.events : [];
+  let latest = null;
+  for (const event of events) {
+    if (event?.type !== "user/message") continue;
+    const data = event.data ?? {};
+    if (data.source?.kind !== "schedule") continue;
+    if (!textOf(data).includes(DREAM_MARKER)) continue;
+    const match = /"occurrence_at"\s*:\s*"([^"]+)"/.exec(textOf(data));
+    const at =
+      match?.[1] ??
+      (typeof event.time === "number"
+        ? new Date(event.time).toISOString()
+        : typeof event.time === "string"
+          ? event.time
+          : null);
+    if (at === null || Number.isNaN(Date.parse(at))) continue;
+    if (latest === null || Date.parse(at) > Date.parse(latest)) latest = at;
+  }
+  return latest;
+}
+
+/**
+ * One-line description of a Host reminder row. "The task exists" and "the task
+ * ran" are different facts: say where it lands and when it last fired.
+ * @param {any} row
+ * @param {string | null} sessionId
+ * @returns {string}
+ */
+function describeHostRow(row, sessionId) {
+  const bound = String(row.sessionId ?? "").replace(/^session-/, "").slice(0, 8);
+  const here = row.sessionId === sessionId ? " (this session)" : "";
+  const delivered = row.lastDelivery?.deliveredAt
+    ? ` · delivered ${row.lastDelivery.deliveredAt}`
+    : " · not delivered yet";
+  return `${row.id} → session ${bound}${here}${delivered}`;
+}
+
+
+/**
  * Remove every Host reminder that belongs to us, leaving the task record alone.
  * @param {any} ctx
  */
@@ -712,6 +766,29 @@ async function removeHostRows(ctx) {
       if (result?.deleted) removed += 1;
     } catch {
       // A row another scope already removed is not an error.
+    }
+  }
+  return { known: true, removed };
+}
+
+/**
+ * Remove our reminders bound to sessions other than `sessionId`. Used when the
+ * delivery arm moves to the session the user is actually in.
+ * @param {any} ctx
+ * @param {string} sessionId
+ */
+async function removeHostRowsExcept(ctx, sessionId) {
+  const rows = await hostRows(ctx);
+  if (rows === null) return { known: false, removed: 0 };
+  const schedule = scheduleService(ctx);
+  let removed = 0;
+  for (const row of rows) {
+    if (!isOurRow(row) || row.sessionId === sessionId) continue;
+    try {
+      const result = await schedule.delete({ sessionId: row.sessionId, id: row.id });
+      if (result?.deleted) removed += 1;
+    } catch {
+      // A stale row elsewhere is harmless; the new one already delivers.
     }
   }
   return { known: true, removed };
@@ -807,6 +884,7 @@ function registerTools(ctx, runtime) {
         {
           name: args.name ? String(args.name) : undefined,
           description: args.description ? String(args.description) : undefined,
+          updated: dateKey(new Date()),
           kind: args.kind ? normalizeKind(args.kind) : undefined,
         },
         body,
@@ -837,11 +915,26 @@ function registerTools(ctx, runtime) {
     parameters: {
       days: { type: "integer", description: "How many recent daily pages to include, 1 to 30." },
     },
-    async execute(args) {
+    async execute(args, exec) {
       await refresh();
       // Delivering the material satisfies whatever queued a request: the
       // caller now holds it. Leaving the queue untouched would nag forever.
       const consumed = await queue.clear();
+      // The Host reminder path never reported back, so the task record said
+      // "never ran" while dreams ran nightly. The occurrence is in this
+      // session's history; record it when the material is actually handed out.
+      const occurrence = scheduledDreamAt(exec?.agent?.session);
+      if (occurrence) {
+        const state = await tasks.load();
+        const previous = state.lastRunAt ? Date.parse(state.lastRunAt) : 0;
+        if (Date.parse(occurrence) > previous) {
+          await tasks.recordRun({
+            status: "ok",
+            detail: `scheduled ${occurrence}`,
+            from: new Date(occurrence),
+          });
+        }
+      }
       const material = await buildDreamMaterial({
         store,
         pendingTurns: capture.pending,
@@ -928,7 +1021,7 @@ function registerTools(ctx, runtime) {
         ours === null
           ? "host reminder: no schedule service (local timer drives it)"
           : ours.length
-            ? `host reminder: ${ours.map((row) => `${row.id} → session ${String(row.sessionId).slice(0, 8)}`).join(", ")}`
+            ? `host reminder: ${ours.map((row) => describeHostRow(row, sessionId)).join(", ")}`
             : config.dreamEnabled
               ? "host reminder: none yet — binds on the next session"
               : "host reminder: none (switch is off; the task record is kept)",

@@ -173,19 +173,98 @@ function buildAutoBlock(turns, sessionId) {
 }
 
 /**
- * Replace the auto block in place, or append one. Text outside the block is
- * preserved byte for byte.
+ * Merge the incoming auto block into the page's existing one.
+ *
+ * Every session writes the page for the day it was active in, so replacing the
+ * block wholesale loses the other sessions' turns: on a day with more than one
+ * session the later flush silently erased the earlier notes. Merge instead —
+ * keep chronological order, drop exact repeats, and list every contributing
+ * session in the trailer.
  * @param {string} existing
  * @param {string} block
  */
 export function upsertAutoBlock(existing, block) {
   const start = existing.indexOf(AUTO_START);
   const end = existing.indexOf(AUTO_END);
-  if (start !== -1 && end !== -1 && end > start) {
-    const before = existing.slice(0, start + AUTO_START.length);
-    const after = existing.slice(end);
-    return `${before}\n${block}\n${after}`;
+  if (start === -1 || end === -1 || end < start) {
+    const trimmed = existing.replace(/\n+$/, "");
+    return `${trimmed}\n\n${AUTO_START}\n${block}\n${AUTO_END}\n`;
   }
-  const trimmed = existing.replace(/\n+$/, "");
-  return `${trimmed}\n\n${AUTO_START}\n${block}\n${AUTO_END}\n`;
+  const before = existing.slice(0, start + AUTO_START.length);
+  const after = existing.slice(end);
+  const current = parseBlock(existing.slice(start, end));
+  const incoming = parseBlock(block);
+  const merged = formatBlock(
+    mergeTurnLines(current.turns, incoming.turns),
+    [...current.sessions, ...incoming.sessions],
+  );
+  return `${before}\n${merged}\n${after}`;
+}
+
+/** @param {string} line */
+function turnTime(line) {
+  const match = /^- (\d{2}:\d{2}) /.exec(line);
+  return match ? match[1] : null;
+}
+
+/**
+ * Merge turn lines: keep chronological order and drop exact repeats (a crash
+ * between the journal write and the page write replays the same turn).
+ * @param {string[]} existing
+ * @param {string[]} incoming
+ * @returns {string[]}
+ */
+export function mergeTurnLines(existing, incoming) {
+  const merged = [...existing];
+  for (const line of incoming) {
+    if (merged.includes(line)) continue;
+    const time = turnTime(line);
+    let at = merged.length;
+    if (time !== null) {
+      const later = merged.findIndex((other) => {
+        const otherTime = turnTime(other);
+        return otherTime !== null && otherTime > time;
+      });
+      if (later !== -1) at = later;
+    }
+    merged.splice(at, 0, line);
+  }
+  return merged;
+}
+
+/**
+ * Split one auto block into its turn lines and contributing sessions.
+ * Older pages carry a single `_session: <id>_` trailer; merged pages carry a
+ * comma-separated list under the same label.
+ * @param {string} text
+ * @returns {{ turns: string[], sessions: string[] }}
+ */
+function parseBlock(text) {
+  const body = text.replace(AUTO_START, "").replace(AUTO_END, "");
+  const turns = [];
+  const sessions = [];
+  for (const raw of body.split("\n")) {
+    const line = raw.trimEnd();
+    if (!line) continue;
+    const trailer = /^_session:\s*(.*)_$/.exec(line);
+    if (trailer) {
+      for (const part of trailer[1].split(",")) {
+        const id = part.trim();
+        if (id) sessions.push(id);
+      }
+      continue;
+    }
+    turns.push(line);
+  }
+  return { turns, sessions };
+}
+
+/**
+ * @param {string[]} turns
+ * @param {string[]} sessions
+ */
+function formatBlock(turns, sessions) {
+  const unique = [...new Set(sessions.filter(Boolean))];
+  if (unique.length === 0) return turns.join("\n");
+  return [...turns, "", `_session: ${unique.join(", ")}_`].join("\n");
 }

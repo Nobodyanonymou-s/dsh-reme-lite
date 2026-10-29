@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -46,6 +46,19 @@ test("dates come from the path, or from frontmatter for digest nodes", async () 
     "sorted ascending",
   );
   assert.equal(days[1].kind, "normal");
+});
+
+test("a digest node without a date still lands on the day it was written", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mem-status5-"));
+  const absolute = join(root, "digest/wiki/old.md");
+  await put(root, "digest/wiki/old.md", "x", "kind: conflict\n");
+  const written = new Date("2026-10-14T20:30:00");
+  await utimes(absolute, written, written);
+
+  const days = await buildDays(root);
+  assert.equal(days.length, 1, "the node is not dropped from the calendar");
+  assert.equal(days[0].date, "2026-10-14");
+  assert.equal(days[0].kind, "conflict", "its colour survives");
 });
 
 test("status payload carries the task snapshot and is ordered", async () => {
