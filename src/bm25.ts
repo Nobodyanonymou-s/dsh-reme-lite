@@ -10,17 +10,12 @@
 const K1 = 1.2;
 const B = 0.75;
 
-/**
- * @param {string} text
- * @returns {string[]}
- */
-export function tokenize(text) {
+export function tokenize(text: string): string[] {
   const lower = text.toLowerCase();
-  /** @type {string[]} */
-  const tokens = [];
+  const tokens: string[] = [];
   const latin = lower.match(/[a-z0-9_]+/g);
   if (latin) tokens.push(...latin);
-  const cjk = lower.match(/[\u3400-\u9fff\u3040-\u30ff]+/g);
+  const cjk = lower.match(/[㐀-鿿぀-ヿ]+/g);
   if (cjk) {
     for (const run of cjk) {
       if (run.length === 1) {
@@ -33,33 +28,35 @@ export function tokenize(text) {
   return tokens;
 }
 
-/**
- * @typedef {{ id: number, text: string, meta: Record<string, unknown> }} Document
- * @typedef {{ doc: Document, score: number }} Hit
- */
+export interface Document {
+  id: number;
+  text: string;
+  meta: Record<string, unknown>;
+}
+
+export interface Hit {
+  doc: Document;
+  score: number;
+}
+
+export interface SearchOptions {
+  limit?: number;
+  minScore?: number;
+}
 
 export class BM25 {
-  constructor() {
-    /** @type {Document[]} */
-    this.docs = [];
-    /** @type {Map<string, number>[]} */
-    this.termFreqs = [];
-    /** @type {number[]} */
-    this.lengths = [];
-    /** @type {Map<string, number>} */
-    this.docFreqs = new Map();
-    this.totalLength = 0;
-    this.dirty = true;
-    /** @type {Map<string, number>} */
-    this.idfCache = new Map();
-  }
+  docs: Document[] = [];
+  termFreqs: Map<string, number>[] = [];
+  lengths: number[] = [];
+  docFreqs: Map<string, number> = new Map();
+  totalLength = 0;
+  dirty = true;
+  idfCache: Map<string, number> = new Map();
 
-  /** @param {Omit<Document, "id">} doc */
-  add(doc) {
+  add(doc: Omit<Document, "id">): number {
     const id = this.docs.length;
     const tokens = tokenize(doc.text);
-    /** @type {Map<string, number>} */
-    const tf = new Map();
+    const tf = new Map<string, number>();
     for (const token of tokens) tf.set(token, (tf.get(token) ?? 0) + 1);
     this.docs.push({ ...doc, id });
     this.termFreqs.push(tf);
@@ -72,16 +69,15 @@ export class BM25 {
     return id;
   }
 
-  get size() {
+  get size(): number {
     return this.docs.length;
   }
 
-  get averageLength() {
+  get averageLength(): number {
     return this.size === 0 ? 0 : this.totalLength / this.size;
   }
 
-  /** @param {string} term */
-  idf(term) {
+  idf(term: string): number {
     const cached = this.idfCache.get(term);
     if (cached !== undefined) return cached;
     const df = this.docFreqs.get(term) ?? 0;
@@ -90,23 +86,16 @@ export class BM25 {
     return idf;
   }
 
-  /**
-   * @param {string} query
-   * @param {{ limit?: number, minScore?: number }} [options]
-   * @returns {Hit[]}
-   */
-  search(query, options = {}) {
+  search(query: string, options: SearchOptions = {}): Hit[] {
     const limit = options.limit ?? 5;
     const minScore = options.minScore ?? 0;
     const terms = tokenize(query);
     if (terms.length === 0 || this.size === 0) return [];
     const avgdl = this.averageLength || 1;
-    /** @type {number[]} */
-    const scores = new Array(this.size).fill(0);
+    const scores: number[] = new Array(this.size).fill(0);
     // Repeated query terms should not multiply the score, but they do raise
     // the weight of the concept, so count them.
-    /** @type {Map<string, number>} */
-    const queryTf = new Map();
+    const queryTf = new Map<string, number>();
     for (const term of terms) queryTf.set(term, (queryTf.get(term) ?? 0) + 1);
 
     for (const [term, qtf] of queryTf) {
@@ -114,18 +103,19 @@ export class BM25 {
       if (df === 0) continue;
       const idf = this.idf(term);
       for (let i = 0; i < this.size; i += 1) {
-        const tf = this.termFreqs[i].get(term);
+        const tf = this.termFreqs[i]?.get(term);
         if (!tf) continue;
         const norm = tf * (K1 + 1);
-        const denom = tf + K1 * (1 - B + (B * this.lengths[i]) / avgdl);
-        scores[i] += (idf * norm * qtf) / denom;
+        const denom = tf + K1 * (1 - B + (B * (this.lengths[i] ?? 0)) / avgdl);
+        scores[i] = (scores[i] ?? 0) + (idf * norm * qtf) / denom;
       }
     }
 
-    /** @type {Hit[]} */
-    const hits = [];
+    const hits: Hit[] = [];
     for (let i = 0; i < this.size; i += 1) {
-      if (scores[i] > minScore) hits.push({ doc: this.docs[i], score: scores[i] });
+      const doc = this.docs[i];
+      const score = scores[i] ?? 0;
+      if (doc && score > minScore) hits.push({ doc, score });
     }
     hits.sort((a, b) => b.score - a.score);
     return hits.slice(0, limit);

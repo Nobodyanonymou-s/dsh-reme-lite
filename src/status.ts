@@ -15,26 +15,28 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-import { dateKey } from "./capture.js";
-import { parseFrontmatter } from "./markdown.js";
+import { dateKey } from "./capture.ts";
+import { parseFrontmatter } from "./markdown.ts";
 
-/** @typedef {"normal" | "notable" | "user-declared" | "conflict"} MemoryKind */
+export type MemoryKind = "normal" | "notable" | "user-declared" | "conflict";
 
-export const KINDS = ["normal", "notable", "user-declared", "conflict"];
-const WEIGHT = { normal: 0, notable: 1, "user-declared": 2, conflict: 3 };
+export const KINDS: readonly MemoryKind[] = ["normal", "notable", "user-declared", "conflict"];
+const WEIGHT: Record<MemoryKind, number> = { normal: 0, notable: 1, "user-declared": 2, conflict: 3 };
 
-/** @param {unknown} value */
-export function normalizeKind(value) {
-  return typeof value === "string" && KINDS.includes(value) ? value : "normal";
+export function normalizeKind(value: unknown): MemoryKind {
+  return typeof value === "string" && (KINDS as readonly string[]).includes(value)
+    ? (value as MemoryKind)
+    : "normal";
 }
 
-/**
- * @param {string} root
- * @returns {Promise<{ relPath: string, kind: MemoryKind, date: string }[]>}
- */
-async function collect(root) {
-  /** @type {{ relPath: string, kind: MemoryKind, date: string }[]} */
-  const out = [];
+interface CollectedFile {
+  relPath: string;
+  kind: MemoryKind;
+  date: string;
+}
+
+async function collect(root: string): Promise<CollectedFile[]> {
+  const out: CollectedFile[] = [];
   for (const dir of ["daily", "digest"]) {
     for (const absolute of await walk(join(root, dir))) {
       const relPath = absolute.slice(root.length + 1).split("\\").join("/");
@@ -48,7 +50,7 @@ async function collect(root) {
       // The date comes from the path when the workspace is organized by day,
       // otherwise from frontmatter — a digest node is dated when it was written.
       const fromPath = /(\d{4}-\d{2}-\d{2})/.exec(relPath);
-      let date = fromPath ? fromPath[1] : String(data.updated ?? data.date ?? "").slice(0, 10);
+      let date = fromPath?.[1] ?? String(data.updated ?? data.date ?? "").slice(0, 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
         // Nodes written before `updated` existed still belong on the calendar:
         // the write time is their date.
@@ -62,10 +64,8 @@ async function collect(root) {
   return out;
 }
 
-/** @param {string} dir @returns {Promise<string[]>} */
-async function walk(dir) {
-  /** @type {string[]} */
-  const out = [];
+async function walk(dir: string): Promise<string[]> {
+  const out: string[] = [];
   let entries;
   try {
     entries = await readdir(dir, { withFileTypes: true });
@@ -80,15 +80,32 @@ async function walk(dir) {
   return out;
 }
 
-/**
- * @param {{ root: string, task?: Record<string, unknown> | null, days?: number }} input
- * @returns {Promise<{ generatedAt: string, kinds: string[], days: { date: string, total: number, kind: MemoryKind, kinds: Record<string, number> }[], task: unknown }>}
- */
-export async function buildStatus(input) {
+export interface StatusInput {
+  root: string;
+  task?: Record<string, unknown> | null;
+  days?: number;
+}
+
+export interface StatusDay {
+  date: string;
+  total: number;
+  kind: MemoryKind;
+  kinds: Record<string, number>;
+}
+
+export interface StatusPayload {
+  generatedAt: string;
+  workspace: string;
+  total: number;
+  kinds: readonly MemoryKind[];
+  days: StatusDay[];
+  task: unknown;
+}
+
+export async function buildStatus(input: StatusInput): Promise<StatusPayload> {
   const days = input.days ?? 180;
   const files = await collect(input.root);
-  /** @type {Map<string, { total: number, kind: MemoryKind, kinds: Record<string, number> }>} */
-  const byDate = new Map();
+  const byDate = new Map<string, { total: number; kind: MemoryKind; kinds: Record<string, number> }>();
   for (const file of files) {
     const entry = byDate.get(file.date) ?? { total: 0, kind: "normal", kinds: {} };
     entry.total += 1;
@@ -115,10 +132,6 @@ export async function buildStatus(input) {
   };
 }
 
-/**
- * @param {string} root
- * @returns {Promise<{ date: string, total: number, kind: MemoryKind, kinds: Record<string, number> }[]>}
- */
-export async function buildDays(root) {
+export async function buildDays(root: string): Promise<StatusDay[]> {
   return (await buildStatus({ root })).days;
 }

@@ -21,16 +21,98 @@ import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { Capture, dateKey } from "./capture.ts";
+import type { Turn } from "./capture.ts";
+import { buildDreamMaterial, dreamPrompt } from "./dream.ts";
+import { DreamQueue } from "./dream-queue.ts";
+import { DEFAULT_CRON, DreamTaskStore } from "./dream-task.ts";
+import { renderNode } from "./markdown.ts";
+import { describeNextRun } from "./schedule.ts";
+import { MemoryStore } from "./store.ts";
+import type { SearchHit } from "./store.ts";
+import { applySettings, loadSettings, saveSettings } from "./settings.ts";
+import { buildStatus, normalizeKind } from "./status.ts";
 
-import { Capture, dateKey } from "./capture.js";
-import { buildDreamMaterial, dreamPrompt } from "./dream.js";
-import { DreamQueue } from "./dream-queue.js";
-import { DEFAULT_CRON, DreamTaskStore } from "./dream-task.js";
-import { renderNode } from "./markdown.js";
-import { describeNextRun } from "./schedule.js";
-import { MemoryStore } from "./store.js";
-import { applySettings, loadSettings, saveSettings } from "./settings.js";
-import { buildStatus, normalizeKind } from "./status.js";
+/**
+ * The Host surface this plugin actually touches, as a structural type.
+ *
+ * The plugin tolerates hosts that lack any given service (file-path mounts,
+ * compositions without a web server or schedule), so it probes at runtime
+ * instead of declaring hard dependencies. These interfaces document that
+ * contract precisely without binding to specific `@deepseek-ai/*` types —
+ * which also keeps the compiled output free of any host import.
+ */
+interface HostContext {
+  effect(setup: () => unknown, label?: string): void;
+  on(name: string, listener: (...args: never[]) => void): void;
+  provide(name: string, value: unknown): void;
+  get(name: string): unknown;
+  logger?: {
+    warn?: (format: string, ...args: unknown[]) => void;
+    info?: (format: string, ...args: unknown[]) => void;
+  };
+  tools?: { register: (tool: RegisteredTool) => () => void };
+  [key: string]: unknown;
+}
+
+interface SessionLike {
+  id?: string;
+  header?: { id?: string; origin?: string } & Record<string, unknown>;
+  events?: unknown[];
+}
+
+interface AgentLike {
+  session?: SessionLike;
+  inbox?: { nextStep?: readonly unknown[] };
+  inject?: (message: unknown) => void;
+}
+
+/** Tool execution context the Host passes as the second execute argument. */
+interface ToolExec {
+  agent?: { session?: SessionLike };
+}
+
+/** One row of the Host schedule catalog, as this plugin reads it. */
+interface ScheduleRow {
+  id?: string;
+  sessionId?: string;
+  title?: string;
+  prompt?: string;
+  lastDelivery?: { scheduledAt?: string; deliveredAt?: string };
+}
+
+interface ScheduleService {
+  create?: (
+    sessionId: string,
+    options: {
+      title: string;
+      prompt: string;
+      cron: { expression: string; time_zone?: string };
+    },
+  ) => Promise<{ id?: string } | undefined | null>;
+  catalog?: () => Promise<ScheduleRow[] | null>;
+  delete?: (reference: { sessionId?: string; id?: string }) => Promise<{ deleted?: boolean }>;
+}
+
+interface ServerRequestLike {
+  method?: string;
+  headers?: Record<string, string | string[] | undefined>;
+  on(event: string, listener: (...args: unknown[]) => void): void;
+  destroy?(): void;
+}
+
+interface ServerResponseLike {
+  writeHead(code: number, headers: Record<string, string>): void;
+  end(body?: string): void;
+}
+
+interface WebServerLike {
+  register: (route: {
+    kind: "exact";
+    path: string;
+    handler: (request: ServerRequestLike, response: ServerResponseLike) => void;
+  }) => () => void;
+}
 
 /**
  * `Config` is resolved lazily, and it is optional by construction.
@@ -63,8 +145,8 @@ export const Config = await (async () => {
   }
 })();
 
-/** @param {any} value */
-function deepFreeze(value) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function deepFreeze(value: any): any {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
     for (const key of Object.keys(value)) deepFreeze(value[key]);
     Object.freeze(value);
@@ -75,25 +157,33 @@ function deepFreeze(value) {
 /**
  * Same shape dsh-llm publishes: a frozen, deeply cloned user message carrying a
  * fresh stable id. `brandString` is erased at runtime, so a plain UUID matches.
- * @param {{ content: any[], source: any }} input
  */
-export function createUserMessage(input) {
+export function createUserMessage(input: { content: unknown[]; source: unknown }): unknown {
   return deepFreeze(structuredClone({ ...input, role: "user", id: randomUUID() }));
 }
+
+export interface ToolParamField {
+  type?: string;
+  required?: boolean;
+  description?: string;
+  enum?: string[];
+  const?: unknown;
+  items?: unknown;
+}
+
+export type ToolParamSpec = Record<string, ToolParamField>;
 
 /**
  * Compile the concise parameter DSL the Host's tools use into the JSON Schema
  * the registry validates against.
- * @param {Record<string, { type?: string, required?: boolean, description?: string, enum?: string[], const?: unknown, items?: any }>} spec
  */
-export function toJsonSchema(spec = {}) {
-  /** @type {Record<string, any>} */
-  const properties = {};
-  /** @type {string[]} */
-  const required = [];
+export function toJsonSchema(spec: ToolParamSpec = {}): Record<string, unknown> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const properties: Record<string, any> = {};
+  const required: string[] = [];
   for (const [key, field] of Object.entries(spec)) {
-    /** @type {Record<string, any>} */
-    const node = { type: field.type ?? "string" };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const node: Record<string, any> = { type: field.type ?? "string" };
     if (field.description) node.description = field.description;
     if (field.enum) node.enum = field.enum;
     if (field.const !== undefined) node.const = field.const;
@@ -104,13 +194,37 @@ export function toJsonSchema(spec = {}) {
   return { type: "object", properties, ...(required.length ? { required } : {}), additionalProperties: false };
 }
 
+export interface ToolOutput {
+  schema: unknown;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  render: (args: any, value: any) => Array<{ type: string; text: unknown }>;
+}
+
+export interface RegisteredTool {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  output: { schema: unknown; render: ToolOutput["render"] };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  execute: (args: any, exec?: any) => unknown;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  presentCall?: (args: any) => unknown;
+}
+
 /**
  * Inline stand-in for dsh-tools `defineTool`: it turns the authoring DSL into
  * the registry-ready definition and adds nothing else the registry needs.
- * @param {{ name: string, description: string, parameters?: any, output: any, execute: Function, presentCall?: Function }} options
  */
-function defineTool(options) {
-  const tool = {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function defineTool<A = any>(options: {
+  name: string;
+  description: string;
+  parameters?: ToolParamSpec;
+  output: ToolOutput;
+  execute: (args: A, exec?: ToolExec) => unknown;
+  presentCall?: (args: A) => unknown;
+}): RegisteredTool {
+  const tool: RegisteredTool = {
     name: options.name,
     description: options.description,
     parameters: toJsonSchema(options.parameters),
@@ -122,12 +236,13 @@ function defineTool(options) {
 }
 
 /**
- * TEMPORARY BOOT BEACON. The Host prints load failures to its own stdout, which
- * a GUI launch makes invisible; this writes the same facts to a file so a failed
- * mount can be diagnosed without guessing. Remove once activation is confirmed.
- * @param {string} message
+ * Boot beacon (opt-in). The Host prints load failures to its own stdout, which
+ * a GUI launch makes invisible; this writes the same facts to a file so a
+ * failed mount can be diagnosed without guessing. Silent by default — set
+ * DSH_NODE_MEMORY_BEACON=1 when a mount needs watching.
  */
-export function beacon(message) {
+export function beacon(message: string): void {
+  if (!process.env.DSH_NODE_MEMORY_BEACON) return;
   const line = `${new Date().toISOString()} ${message}\n`;
   // A fixed path, not tmpdir(): the Host's TEMP differs from the agent shell's
   // TEMP, which made the first diagnosis attempt look at an empty file.
@@ -148,13 +263,11 @@ export const name = "node-memory";
 // plugin refuse to load in a composition that leaves it out. We probe it instead.
 export const inject = ["agents", "sessions", "tools"];
 
-// NOTE: there is deliberately no `Config` export any more. A schemastery schema
-// would reintroduce an `@deepseek-ai/*` import, which is exactly what made the
-// plugin fail to load. Configuration therefore arrives as a plain object from
-// the mounting patch entry:
+// Configuration arrives as a plain object from the mounting patch entry (and,
+// when the Host can resolve schemastery, through the `Config` schema above):
 //
 //   - id: node-memory
-//     name: "C:/.../src/plugin.js"
+//     name: dsh-reme-lite
 //     config: { dreamEnabled: true, dreamCron: "0 23 * * *" }
 
 const SOURCE = "node-memory";
@@ -163,35 +276,30 @@ const DREAM_MARKER = "[[node-memory:dream]]";
 const TICK_MS = 30_000;
 const MAX_EVIDENCE_CHARS = 4000;
 
-/**
- * @typedef {object} MemoryConfig
- * @property {string} workspace
- * @property {"zh" | "en"} language
- * @property {boolean} captureEnabled
- * @property {boolean} rootAgentsOnly
- * @property {number} captureInterval
- * @property {number} searchLimit
- * @property {number} maxChars
- * @property {number} reindexTtlMs
- * @property {string} dreamCron
- * @property {string | null} dreamTimeZone
- * @property {string} dreamTitle
- */
+export interface MemoryConfig {
+  workspace: string;
+  language: "zh" | "en";
+  captureEnabled: boolean;
+  rootAgentsOnly: boolean;
+  captureInterval: number;
+  searchLimit: number;
+  maxChars: number;
+  reindexTtlMs: number;
+  dreamEnabled: boolean;
+  dreamCron: string;
+  dreamTimeZone: string | null;
+  dreamTitle: string;
+}
 
-/**
- * @param {Partial<MemoryConfig>} [input]
- * @param {NodeJS.ProcessEnv} [env]
- * @returns {MemoryConfig}
- */
 /**
  * Working language. `auto` (the default) follows the system locale, so the
  * plugin speaks whatever the machine speaks; an explicit zh/en wins and is what
  * the settings dropdown writes.
- * @param {string | undefined} requested
- * @param {NodeJS.ProcessEnv} [env]
- * @returns {"zh" | "en"}
  */
-export function resolveLanguage(requested, env = process.env) {
+export function resolveLanguage(
+  requested: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): "zh" | "en" {
   if (requested === "zh" || requested === "en") return requested;
   const raw = String(env.LC_ALL || env.LC_MESSAGES || env.LANG || "").toLowerCase();
   if (raw.startsWith("zh")) return "zh";
@@ -204,7 +312,7 @@ export function resolveLanguage(requested, env = process.env) {
   }
 }
 
-export function resolveConfig(input = {}, env = process.env) {
+export function resolveConfig(input: Partial<MemoryConfig> = {}, env: NodeJS.ProcessEnv = process.env): MemoryConfig {
   const dshHome = env.DSH_HOME || join(homedir(), ".dsh");
   const language = resolveLanguage(input.language, env);
   return {
@@ -251,16 +359,14 @@ const GUIDANCE = {
   ].join("\n"),
 };
 
-/** @param {string} language */
-export function memoryGuidance(language = "zh") {
+export function memoryGuidance(language: "zh" | "en" = "zh"): string {
   return language === "en" ? GUIDANCE.en : GUIDANCE.zh;
 }
 
 /**
  * The prompt the Host delivers when the reminder fires.
- * @param {"zh" | "en"} language
  */
-export function dreamReminderPrompt(language = "zh") {
+export function dreamReminderPrompt(language: "zh" | "en" = "zh"): string {
   return language === "en"
     ? [
         `${DREAM_MARKER}`,
@@ -277,23 +383,30 @@ export function dreamReminderPrompt(language = "zh") {
       ].join("\n");
 }
 
-/**
- * @param {import("@deepseek-ai/cordis").Context} ctx
- * @param {Partial<MemoryConfig>} [input]
- */
-export function apply(ctx, input = {}) {
+interface Runtime {
+  ctx: HostContext;
+  store: MemoryStore;
+  capture: Capture;
+  tasks: DreamTaskStore;
+  queue: DreamQueue;
+  config: MemoryConfig;
+}
+
+type ToolsRuntime = Runtime & { refresh: () => Promise<void> };
+
+export function apply(ctx: HostContext, input: Partial<MemoryConfig> = {}): void {
   beacon("apply-start");
   try {
     const result = applyInner(ctx, input);
     beacon("apply-done");
     return result;
   } catch (error) {
-    beacon(`apply-error ${error && error.stack ? error.stack : error}`);
+    beacon(`apply-error ${error instanceof Error && error.stack ? error.stack : String(error)}`);
     throw error;
   }
 }
 
-function applyInner(ctx, input = {}) {
+function applyInner(ctx: HostContext, input: Partial<MemoryConfig> = {}): void {
   const config = resolveConfig(input);
   beacon(
     `workspace=${config.workspace} dsh_home=${process.env.DSH_HOME ?? "-"} homedir=${homedir()} cwd=${process.cwd()}`,
@@ -303,17 +416,16 @@ function applyInner(ctx, input = {}) {
   const tasks = new DreamTaskStore({ root: config.workspace });
   const queue = new DreamQueue({ root: config.workspace });
 
-  /** @type {Promise<unknown>} */
-  let ready = store.rebuild().catch((error) => {
-    beacon(`rebuild-error ${error && error.stack ? error.stack : error}`);
+  let ready: Promise<unknown> = store.rebuild().catch((error: unknown) => {
+    beacon(`rebuild-error ${error instanceof Error && error.stack ? error.stack : String(error)}`);
     ctx.logger?.warn?.(`[${SOURCE}] initial index failed: ${describe(error)}`);
   });
 
-  const runtime = { ctx, store, capture, tasks, queue, config };
+  const runtime: Runtime = { ctx, store, capture, tasks, queue, config };
 
   // Settings the user changed from the page outrank the mount config. Loading
   // is async, so the merge is a small promise the routes and tools await.
-  let settingsReady = loadSettings(config.workspace)
+  const settingsReady = loadSettings(config.workspace)
     .then((saved) => {
       Object.assign(config, applySettings(config, saved));
     })
@@ -322,7 +434,7 @@ function applyInner(ctx, input = {}) {
   const refresh = async () => {
     await ready;
     if (Date.now() - store.builtAt > config.reindexTtlMs) {
-      ready = store.rebuild().catch((error) => {
+      ready = store.rebuild().catch((error: unknown) => {
         ctx.logger?.warn?.(`[${SOURCE}] reindex failed: ${describe(error)}`);
       });
       await ready;
@@ -345,7 +457,7 @@ function applyInner(ctx, input = {}) {
 
   // Config changes (Settings → Plugins) land here; reconcile the switch.
   void ready.then(() =>
-    reconcile(runtime, null).catch((error) => {
+    reconcile(runtime, null).catch((error: unknown) => {
       ctx.logger?.warn?.(`[${SOURCE}] initial reconcile failed: ${describe(error)}`);
     }),
   );
@@ -354,62 +466,63 @@ function applyInner(ctx, input = {}) {
 
   // Fallback driver. Inert while the Host owns a schedule for us.
   const timer = setInterval(() => {
-    void tickFallback(runtime).catch((error) => {
+    void tickFallback(runtime).catch((error: unknown) => {
       ctx.logger?.warn?.(`[${SOURCE}] dream tick failed: ${describe(error)}`);
     });
   }, TICK_MS);
   if (typeof timer.unref === "function") timer.unref();
   ctx.effect(() => () => clearInterval(timer), "nodeMemory.timer()");
 
-  ctx.on("agent/created", ({ agent }) => {
-    /** @type {any} */
+  ctx.on("agent/created", (({ agent }: { agent?: AgentLike }) => {
     const target = agent;
     if (!target?.session) return;
     if (config.rootAgentsOnly && target.session.header?.origin === "subagent") return;
-    void onSessionStart(runtime, target).catch((error) => {
+    void onSessionStart(runtime, target).catch((error: unknown) => {
       ctx.logger?.warn?.(`[${SOURCE}] session start failed: ${describe(error)}`);
     });
-  });
+  }) as (...args: never[]) => void);
 
-  /** @type {Set<string>} */
-  const warned = new Set();
-  ctx.on("session/event", (session, event) => {
+  const warned = new Set<string>();
+  ctx.on("session/event", ((session: SessionLike, event: unknown) => {
     if (!config.captureEnabled) return;
     if (config.rootAgentsOnly && session.header?.origin === "subagent") return;
     const turn = turnFromEvent(event);
     if (!turn) {
-      const type = typeof event?.type === "string" ? event.type : "";
-      if (env.debug && type && !warned.has(type)) {
+      const type = textOfRecord(event)?.type;
+      if (env.debug && typeof type === "string" && type && !warned.has(type)) {
         warned.add(type);
         ctx.logger?.info?.(`[${SOURCE}] unrecognized session event: ${type}`);
       }
       return;
     }
     const sessionId = session.header?.id ?? session.id ?? "unknown";
-    void capture.record(sessionId, turn).catch((error) => {
+    void capture.record(sessionId, turn).catch((error: unknown) => {
       ctx.logger?.warn?.(`[${SOURCE}] capture failed: ${describe(error)}`);
     });
-  });
+  }) as (...args: never[]) => void);
 
-  ctx.on("loader/volatile-update", () => {
+  ctx.on("loader/volatile-update", (() => {
     ready = store.rebuild().catch(() => {});
     void ready.then(() =>
-      reconcile(runtime, null).catch((error) => {
+      reconcile(runtime, null).catch((error: unknown) => {
         ctx.logger?.warn?.(`[${SOURCE}] reconcile after settings change failed: ${describe(error)}`);
       }),
     );
-  });
+  }) as (...args: never[]) => void);
 }
 
 const env = { debug: Boolean(process.env.DSH_MEMORY_DEBUG) };
 
+/** Narrow an unknown value to a record without asserting anything about its shape. */
+function textOfRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
 /**
  * Guidance, self-healing rebind, and queue drain — everything a fresh session
  * needs from the memory system.
- * @param {{ ctx: any, store: MemoryStore, capture: Capture, tasks: DreamTaskStore, queue: DreamQueue, config: MemoryConfig }} runtime
- * @param {any} agent
  */
-async function onSessionStart(runtime, agent) {
+async function onSessionStart(runtime: Runtime, agent: AgentLike): Promise<void> {
   const { ctx, config, tasks, queue } = runtime;
 
   if (agent.inject) {
@@ -442,17 +555,15 @@ async function onSessionStart(runtime, agent) {
 
   // Self-heal: the switch says on, but the Host reminder may be gone because
   // the session that owned it was archived. Rebind to this one.
-  await reconcile(runtime, agent.session?.id ?? null);
+  await reconcile(runtime, agent.session?.header?.id ?? agent.session?.id ?? null);
 }
 
 /**
  * Bring the durable task record and the Host reminder in line with the config
  * switch. Config is the single source of intent; the record keeps history and
  * the Host row is only its delivery arm.
- * @param {{ ctx: any, config: MemoryConfig, tasks: DreamTaskStore }} runtime
- * @param {string | null} sessionId
  */
-async function reconcile(runtime, sessionId) {
+async function reconcile(runtime: Runtime, sessionId: string | null): Promise<void> {
   const { ctx, config, tasks } = runtime;
   const state = await tasks.load();
   const rows = await hostRows(ctx);
@@ -490,11 +601,10 @@ async function reconcile(runtime, sessionId) {
   if (bound.bound) await removeHostRowsExcept(ctx, sessionId);
 }
 
-/**
- * @param {{ ctx: any, config: MemoryConfig, tasks: DreamTaskStore }} runtime
- * @param {string} sessionId
- */
-async function bindHostReminder(runtime, sessionId) {
+async function bindHostReminder(
+  runtime: Runtime,
+  sessionId: string,
+): Promise<{ bound: boolean; reason?: string; id?: string | null; sessionId?: string }> {
   const { ctx, config, tasks } = runtime;
   const schedule = scheduleService(ctx);
   if (!schedule?.create || !sessionId) return { bound: false, reason: "no schedule service" };
@@ -519,11 +629,8 @@ async function bindHostReminder(runtime, sessionId) {
  * Optional service lookup: `ctx.get` is cordis' accessor for services this
  * plugin does not declare in `inject` (declaring them would turn an optional
  * dependency into a hard one and stop the plugin from loading without it).
- * @param {any} ctx
- * @param {string} name
- * @returns {any | null}
  */
-function service(ctx, name) {
+function service(ctx: HostContext, name: string): unknown {
   try {
     const viaGet = typeof ctx.get === "function" ? ctx.get(name) : undefined;
     return viaGet ?? ctx[name] ?? null;
@@ -532,12 +639,13 @@ function service(ctx, name) {
   }
 }
 
-/**
- * @param {any} ctx
- * @returns {any | null}
- */
-function scheduleService(ctx) {
-  return service(ctx, "schedule");
+function scheduleService(ctx: HostContext): ScheduleService | null {
+  return service(ctx, "schedule") as ScheduleService | null;
+}
+
+function webServerService(ctx: HostContext): WebServerLike | null {
+  const web = service(ctx, "webServer");
+  return web && typeof (web as WebServerLike).register === "function" ? (web as WebServerLike) : null;
 }
 
 /**
@@ -545,18 +653,18 @@ function scheduleService(ctx) {
  * the page's own controls post back. Both routes are same-origin and localhost
  * only; the settings route refuses a foreign Origin so another page on this
  * machine cannot flip the switch.
- * @param {any} ctx
- * @param {{ ctx: any, tasks: DreamTaskStore, config: MemoryConfig }} runtime
- * @param {() => Promise<void>} refresh
- * @param {() => Promise<unknown>} settingsLoaded
  */
-function registerRoutes(ctx, runtime, refresh, settingsLoaded) {
-  /** @type {Array<() => void>} */
-  const disposers = [];
-  let timer = null;
+function registerRoutes(
+  ctx: HostContext,
+  runtime: Runtime,
+  refresh: () => Promise<void>,
+  settingsLoaded: () => Promise<unknown>,
+): () => void {
+  const disposers: Array<() => void> = [];
+  let timer: NodeJS.Timeout | null = null;
   let attempts = 0;
 
-  const send = (response, code, body) => {
+  const send = (response: ServerResponseLike, code: number, body: unknown) => {
     response.writeHead(code, {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
@@ -591,7 +699,7 @@ function registerRoutes(ctx, runtime, refresh, settingsLoaded) {
     };
   };
 
-  const statusHandler = async (_request, response) => {
+  const statusHandler = async (_request: ServerRequestLike, response: ServerResponseLike) => {
     try {
       send(response, 200, await statusBody());
     } catch (error) {
@@ -599,13 +707,14 @@ function registerRoutes(ctx, runtime, refresh, settingsLoaded) {
     }
   };
 
-  const settingsHandler = async (request, response) => {
+  const settingsHandler = async (request: ServerRequestLike, response: ServerResponseLike) => {
     if (request.method !== "POST") {
       send(response, 405, { error: "POST required" });
       return;
     }
     const origin = request.headers?.origin;
-    if (origin && request.headers?.host && new URL(origin).host !== request.headers.host) {
+    const host = request.headers?.host;
+    if (typeof origin === "string" && typeof host === "string" && new URL(origin).host !== host) {
       send(response, 403, { error: "cross-origin settings write refused" });
       return;
     }
@@ -625,8 +734,8 @@ function registerRoutes(ctx, runtime, refresh, settingsLoaded) {
   // loading). Wait for the service instead of racing it.
   const attempt = () => {
     timer = null;
-    const web = service(ctx, "webServer");
-    if (web && typeof web.register === "function") {
+    const web = webServerService(ctx);
+    if (web) {
       disposers.push(web.register({ kind: "exact", path: "/node-memory/status.json", handler: statusHandler }));
       disposers.push(web.register({ kind: "exact", path: "/node-memory/settings", handler: settingsHandler }));
       beacon("routes-registered");
@@ -649,31 +758,29 @@ function registerRoutes(ctx, runtime, refresh, settingsLoaded) {
 
 /**
  * Read a small JSON request body; refuses anything that is not a plain object.
- * @param {any} request
- * @returns {Promise<Record<string, unknown>>}
  */
-function readJsonBody(request) {
+function readJsonBody(request: ServerRequestLike): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
-    /** @type {Buffer[]} */
-    const chunks = [];
+    const chunks: Buffer[] = [];
     let size = 0;
     request.on("data", (chunk) => {
-      size += chunk.length;
+      const buffer = chunk as Buffer;
+      size += buffer.length;
       if (size > 64 * 1024) {
         reject(new Error("request body too large"));
         request.destroy?.();
         return;
       }
-      chunks.push(chunk);
+      chunks.push(buffer);
     });
     request.on("end", () => {
       try {
-        const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+        const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
           reject(new Error("body must be a JSON object"));
           return;
         }
-        resolve(parsed);
+        resolve(parsed as Record<string, unknown>);
       } catch (error) {
         reject(error);
       }
@@ -682,8 +789,7 @@ function readJsonBody(request) {
   });
 }
 
-/** @param {any} ctx */
-async function hostRows(ctx) {
+async function hostRows(ctx: HostContext): Promise<ScheduleRow[] | null> {
   const schedule = scheduleService(ctx);
   if (!schedule?.catalog) return null;
   try {
@@ -693,8 +799,7 @@ async function hostRows(ctx) {
   }
 }
 
-/** @param {any} row */
-function isOurRow(row) {
+function isOurRow(row: ScheduleRow): boolean {
   return row?.title === undefined
     ? false
     : row.title === DREAM_TITLE_CACHE ||
@@ -708,16 +813,17 @@ let DREAM_TITLE_CACHE = "记忆整理";
  * Latest occurrence of a scheduled consolidation reminder delivered into
  * `session`. The Host delivers it as a user message whose source kind is
  * `schedule`; the occurrence instant travels in the message text.
- * @param {any} session
- * @returns {string | null} ISO instant, or null when this session has none
+ * @returns ISO instant, or null when this session has none
  */
-function scheduledDreamAt(session) {
+function scheduledDreamAt(session: SessionLike | undefined): string | null {
   const events = Array.isArray(session?.events) ? session.events : [];
-  let latest = null;
-  for (const event of events) {
+  let latest: string | null = null;
+  for (const raw of events) {
+    const event = textOfRecord(raw);
     if (event?.type !== "user/message") continue;
-    const data = event.data ?? {};
-    if (data.source?.kind !== "schedule") continue;
+    const data = textOfRecord(event.data) ?? {};
+    const source = textOfRecord(data.source);
+    if (source?.kind !== "schedule") continue;
     if (!textOf(data).includes(DREAM_MARKER)) continue;
     const match = /"occurrence_at"\s*:\s*"([^"]+)"/.exec(textOf(data));
     const at =
@@ -738,18 +844,15 @@ function scheduledDreamAt(session) {
  * delivery, so its record about the reminder bound to this session is
  * authoritative; the session-event scan is only a fallback for hosts without a
  * schedule service.
- * @param {any} ctx
- * @param {any} exec
- * @returns {Promise<string | null>}
  */
-async function scheduledOccurrence(ctx, exec) {
-  const sessionId = exec?.agent?.session?.id ?? null;
+async function scheduledOccurrence(ctx: HostContext, exec?: ToolExec): Promise<string | null> {
+  const sessionId = exec?.agent?.session?.header?.id ?? exec?.agent?.session?.id ?? null;
   const rows = await hostRows(ctx);
   if (rows !== null && sessionId) {
     const delivered = rows
       .filter((row) => isOurRow(row) && row.sessionId === sessionId)
       .map((row) => row.lastDelivery?.scheduledAt)
-      .filter((value) => typeof value === "string")
+      .filter((value): value is string => typeof value === "string")
       .sort()
       .at(-1);
     if (delivered) return delivered;
@@ -760,11 +863,8 @@ async function scheduledOccurrence(ctx, exec) {
 /**
  * One-line description of a Host reminder row. "The task exists" and "the task
  * ran" are different facts: say where it lands and when it last fired.
- * @param {any} row
- * @param {string | null} sessionId
- * @returns {string}
  */
-function describeHostRow(row, sessionId) {
+function describeHostRow(row: ScheduleRow, sessionId: string | null): string {
   const bound = String(row.sessionId ?? "").replace(/^session-/, "").slice(0, 8);
   const here = row.sessionId === sessionId ? " (this session)" : "";
   const delivered = row.lastDelivery?.deliveredAt
@@ -773,12 +873,10 @@ function describeHostRow(row, sessionId) {
   return `${row.id} → session ${bound}${here}${delivered}`;
 }
 
-
 /**
  * Remove every Host reminder that belongs to us, leaving the task record alone.
- * @param {any} ctx
  */
-async function removeHostRows(ctx) {
+async function removeHostRows(ctx: HostContext): Promise<{ known: boolean; removed: number }> {
   const rows = await hostRows(ctx);
   if (rows === null) return { known: false, removed: 0 };
   const schedule = scheduleService(ctx);
@@ -786,7 +884,7 @@ async function removeHostRows(ctx) {
   for (const row of rows) {
     if (!isOurRow(row)) continue;
     try {
-      const result = await schedule.delete({ sessionId: row.sessionId, id: row.id });
+      const result = await schedule?.delete?.({ sessionId: row.sessionId, id: row.id });
       if (result?.deleted) removed += 1;
     } catch {
       // A row another scope already removed is not an error.
@@ -798,10 +896,8 @@ async function removeHostRows(ctx) {
 /**
  * Remove our reminders bound to sessions other than `sessionId`. Used when the
  * delivery arm moves to the session the user is actually in.
- * @param {any} ctx
- * @param {string} sessionId
  */
-async function removeHostRowsExcept(ctx, sessionId) {
+async function removeHostRowsExcept(ctx: HostContext, sessionId: string): Promise<{ known: boolean; removed: number }> {
   const rows = await hostRows(ctx);
   if (rows === null) return { known: false, removed: 0 };
   const schedule = scheduleService(ctx);
@@ -809,7 +905,7 @@ async function removeHostRowsExcept(ctx, sessionId) {
   for (const row of rows) {
     if (!isOurRow(row) || row.sessionId === sessionId) continue;
     try {
-      const result = await schedule.delete({ sessionId: row.sessionId, id: row.id });
+      const result = await schedule?.delete?.({ sessionId: row.sessionId, id: row.id });
       if (result?.deleted) removed += 1;
     } catch {
       // A stale row elsewhere is harmless; the new one already delivers.
@@ -821,10 +917,9 @@ async function removeHostRowsExcept(ctx, sessionId) {
 /**
  * Fallback when the Host has no schedule service: due work is queued for the
  * next session instead of being executed here.
- * @param {{ ctx: any, store: MemoryStore, capture: Capture, tasks: DreamTaskStore, queue: DreamQueue, config: MemoryConfig }} runtime
  */
-async function tickFallback(runtime) {
-  const { ctx, tasks, queue, store, capture } = runtime;
+async function tickFallback(runtime: Runtime): Promise<void> {
+  const { ctx, tasks, queue, store, capture, config } = runtime;
   if (scheduleService(ctx)) return; // the Host owns the trigger
   const state = await tasks.load();
   if (!tasks.isDue(state)) return;
@@ -833,15 +928,11 @@ async function tickFallback(runtime) {
   await tasks.recordRun({ status: "skipped", detail: "queued for next session" });
 }
 
-/**
- * @param {any} ctx
- * @param {{ store: MemoryStore, capture: Capture, tasks: DreamTaskStore, queue: DreamQueue, config: MemoryConfig, refresh: () => Promise<void> }} runtime
- */
-function registerTools(ctx, runtime) {
+function registerTools(ctx: HostContext, runtime: ToolsRuntime): () => void {
   const { store, capture, tasks, queue, config, refresh } = runtime;
   DREAM_TITLE_CACHE = config.dreamTitle;
 
-  const search = defineTool({
+  const search = defineTool<{ query?: any; limit?: unknown; min_score?: unknown }>({
     name: "memory_search",
     description: [
       "Search long-term memory before answering questions that depend on prior facts,",
@@ -874,7 +965,7 @@ function registerTools(ctx, runtime) {
     }),
   });
 
-  const write = defineTool({
+  const write = defineTool<{ path?: any; content?: any; name?: unknown; description?: unknown; kind?: unknown }>({
     name: "memory_write",
     description: [
       "Create or replace a Markdown memory node under daily/ or digest/.",
@@ -929,7 +1020,7 @@ function registerTools(ctx, runtime) {
     }),
   });
 
-  const dream = defineTool({
+  const dream = defineTool<{ days?: unknown }>({
     name: "memory_dream",
     description: [
       "Collect consolidation material: recent daily pages, existing digest inventory,",
@@ -977,7 +1068,7 @@ function registerTools(ctx, runtime) {
     presentCall: () => ({ card: "generic", kind: "read", title: "Memory consolidation material" }),
   });
 
-  const schedule = defineTool({
+  const schedule = defineTool<{ action?: any; cron?: unknown; time_zone?: unknown }>({
     name: "memory_schedule",
     description: [
       "Manage scheduled memory consolidation.",
@@ -996,7 +1087,7 @@ function registerTools(ctx, runtime) {
     },
     async execute(args, exec) {
       const action = String(args.action ?? "status");
-      const sessionId = exec?.agent?.session?.id ?? null;
+      const sessionId = exec?.agent?.session?.header?.id ?? exec?.agent?.session?.id ?? null;
 
       if (action === "enable" || action === "disable") {
         const want = action === "enable";
@@ -1064,20 +1155,17 @@ function registerTools(ctx, runtime) {
   });
 
   const disposers = [
-    ctx.tools.register(search),
-    ctx.tools.register(write),
-    ctx.tools.register(dream),
-    ctx.tools.register(schedule),
-  ];
+    ctx.tools?.register(search),
+    ctx.tools?.register(write),
+    ctx.tools?.register(dream),
+    ctx.tools?.register(schedule),
+  ].filter((dispose): dispose is () => void => typeof dispose === "function");
   return () => {
     for (const dispose of disposers) dispose?.();
   };
 }
 
-/**
- * @param {import("./store.js").SearchHit[]} hits
- */
-export function formatEvidence(hits) {
+export function formatEvidence(hits: SearchHit[]): string {
   const blocks = hits.map((hit, index) => {
     const via = hit.via ? ` · via ${hit.via}` : "";
     const heading = hit.heading ? ` · ${hit.heading}` : "";
@@ -1094,38 +1182,39 @@ export function formatEvidence(hits) {
 
 /**
  * Extract a capturable turn from a session event, tolerating payload shapes.
- * @param {any} event
- * @returns {{ role: "user" | "assistant", text: string, at: string } | null}
  */
-export function turnFromEvent(event) {
-  const type = typeof event?.type === "string" ? event.type : "";
-  /** @type {"user" | "assistant" | null} */
-  const role = type.startsWith("user/")
+export function turnFromEvent(event: unknown): Turn | null {
+  const record = textOfRecord(event);
+  const type = typeof record?.type === "string" ? record.type : "";
+  const role: Turn["role"] | null = type.startsWith("user/")
     ? "user"
     : type.startsWith("assistant/")
       ? "assistant"
       : null;
   if (!role) return null;
-  const data = event?.data ?? {};
+  const data = textOfRecord(record?.data) ?? {};
   // `user/message` carries the message directly; `assistant/message` wraps it in
   // `data.message` and puts the raw stream in `data.stream`. Getting this wrong
   // silently captures nothing, which is worse than crashing.
-  const message = role === "assistant" ? (data.message ?? data) : data;
-  if (message?.source?.kind === SOURCE) return null;
-  if (message?.source?.plugin === SOURCE) return null;
+  const message = role === "assistant" ? (textOfRecord(data.message) ?? data) : data;
+  const messageSource = textOfRecord(message.source);
+  if (messageSource?.kind === SOURCE) return null;
+  if (messageSource?.plugin === SOURCE) return null;
   const text = textOf(message);
   if (!text) return null;
+  const eventTime = record?.time;
+  const messageTime = message.time;
   const at =
-    typeof event?.time === "string"
-      ? event.time
-      : typeof message?.time === "string"
-        ? message.time
+    typeof eventTime === "string"
+      ? eventTime
+      : typeof messageTime === "string"
+        ? messageTime
         : new Date().toISOString();
   return { role, text, at };
 }
 
-/** @param {any} data */
-function textOf(data) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function textOf(data: any): string {
   if (typeof data?.text === "string") return data.text;
   const content = data?.content;
   if (typeof content === "string") return content;
@@ -1139,37 +1228,26 @@ function textOf(data) {
   return "";
 }
 
-/**
- * @param {any} session
- * @param {readonly unknown[]} [pending]
- */
-export function hasGuidance(session, pending = []) {
-  const exists = (value) => {
-    const source = value && typeof value === "object" ? value.source : undefined;
-    return (
+export function hasGuidance(session: unknown, pending: readonly unknown[] = []): boolean {
+  const exists = (value: unknown) => {
+    const source = textOfRecord(textOfRecord(value)?.source);
+    return Boolean(
       source &&
-      typeof source === "object" &&
-      (source.kind === SOURCE || source.plugin === SOURCE) &&
-      source.form === "instructions"
+        (source.kind === SOURCE || source.plugin === SOURCE) &&
+        source.form === "instructions",
     );
   };
-  const events = Array.isArray(session?.events) ? session.events : [];
-  return events.some((event) => event?.type === "user/message" && exists(event.data)) || pending.some(exists);
+  const sessionRecord = textOfRecord(session);
+  const events = Array.isArray(sessionRecord?.events) ? sessionRecord.events : [];
+  return events.some((event) => textOfRecord(event)?.type === "user/message" && exists(textOfRecord(event)?.data)) || pending.some(exists);
 }
 
-/**
- * @param {unknown} value
- * @param {number} minimum
- * @param {number} maximum
- * @param {number} fallback
- */
-function clamp(value, minimum, maximum, fallback) {
+function clamp(value: unknown, minimum: number, maximum: number, fallback: number): number {
   const number = Math.round(Number(value));
   if (!Number.isFinite(number)) return fallback;
   return Math.max(minimum, Math.min(maximum, number));
 }
 
-/** @param {unknown} error */
-function describe(error) {
+function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

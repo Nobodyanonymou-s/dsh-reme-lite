@@ -2,25 +2,25 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { it } from "vitest";
 
-import { buildDays, buildStatus, KINDS, normalizeKind } from "../src/status.js";
+import { buildDays, buildStatus, KINDS, normalizeKind } from "../src/status.ts";
 
 /** @param {string} root @param {string} rel @param {string} body @param {string} [frontmatter] */
-async function put(root, rel, body, frontmatter = "") {
+async function put(root: string, rel: string, body: string, frontmatter = ""): Promise<void> {
   const absolute = join(root, rel);
   await mkdir(join(absolute, ".."), { recursive: true });
   await writeFile(absolute, `---\n${frontmatter}---\n\n${body}\n`, "utf8");
 }
 
-test("unknown kinds degrade to normal", () => {
+it("unknown kinds degrade to normal", () => {
   assert.equal(normalizeKind("conflict"), "conflict");
   assert.equal(normalizeKind("nonsense"), "normal");
   assert.equal(normalizeKind(undefined), "normal");
   assert.deepEqual(KINDS, ["normal", "notable", "user-declared", "conflict"]);
 });
 
-test("a day takes the strongest kind it contains", async () => {
+it("a day takes the strongest kind it contains", async () => {
   const root = await mkdtemp(join(tmpdir(), "mem-status-"));
   await put(root, "daily/2026-10-20.md", "a", "kind: notable\n");
   await put(root, "daily/2026-10-20/x.md", "b", "kind: normal\n");
@@ -34,7 +34,7 @@ test("a day takes the strongest kind it contains", async () => {
   assert.equal(day.kinds.notable, 1);
 });
 
-test("dates come from the path, or from frontmatter for digest nodes", async () => {
+it("dates come from the path, or from frontmatter for digest nodes", async () => {
   const root = await mkdtemp(join(tmpdir(), "mem-status2-"));
   await put(root, "daily/2026-10-19.md", "x");
   await put(root, "digest/personal/pref.md", "y", "updated: 2026-10-18\n");
@@ -45,10 +45,10 @@ test("dates come from the path, or from frontmatter for digest nodes", async () 
     ["2026-10-18", "2026-10-19"],
     "sorted ascending",
   );
-  assert.equal(days[1].kind, "normal");
+  assert.equal(days[1]!.kind, "normal");
 });
 
-test("a digest node without a date still lands on the day it was written", async () => {
+it("a digest node without a date still lands on the day it was written", async () => {
   const root = await mkdtemp(join(tmpdir(), "mem-status5-"));
   const absolute = join(root, "digest/wiki/old.md");
   await put(root, "digest/wiki/old.md", "x", "kind: conflict\n");
@@ -57,11 +57,11 @@ test("a digest node without a date still lands on the day it was written", async
 
   const days = await buildDays(root);
   assert.equal(days.length, 1, "the node is not dropped from the calendar");
-  assert.equal(days[0].date, "2026-10-14");
-  assert.equal(days[0].kind, "conflict", "its colour survives");
+  assert.equal(days[0]!.date, "2026-10-14");
+  assert.equal(days[0]!.kind, "conflict", "its colour survives");
 });
 
-test("status payload carries the task snapshot and is ordered", async () => {
+it("status payload carries the task snapshot and is ordered", async () => {
   const root = await mkdtemp(join(tmpdir(), "mem-status3-"));
   await put(root, "daily/2026-10-01.md", "a", "kind: user-declared\n");
   await put(root, "daily/2026-10-03.md", "b");
@@ -72,15 +72,15 @@ test("status payload carries the task snapshot and is ordered", async () => {
   });
   assert.equal(status.days.length, 2);
   assert.deepEqual(status.days.map((entry) => entry.date), ["2026-10-01", "2026-10-03"]);
-  assert.equal(status.days[0].kind, "user-declared");
-  assert.equal(status.task.cron, "0 23 * * *");
+  assert.equal(status.days[0]!.kind, "user-declared");
+  assert.equal((status.task as { cron?: string }).cron, "0 23 * * *");
   assert.ok(status.generatedAt);
   assert.deepEqual(status.kinds, KINDS);
   assert.equal(status.total, 2, "total counts memory entries, not files touched");
   assert.equal(status.workspace, root);
 });
 
-test("an empty workspace yields an empty heatmap, not an error", async () => {
+it("an empty workspace yields an empty heatmap, not an error", async () => {
   const root = await mkdtemp(join(tmpdir(), "mem-status4-"));
   const status = await buildStatus({ root });
   assert.deepEqual(status.days, []);

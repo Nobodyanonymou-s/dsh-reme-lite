@@ -8,11 +8,18 @@
  * agent, or the user via the `memory_dream` tool. One builder, three callers.
  */
 
-/**
- * @param {{ store: import("./store.js").MemoryStore, pendingTurns?: number, days?: number, language?: "zh" | "en" }} input
- * @returns {Promise<string>}
- */
-export async function buildDreamMaterial(input) {
+import type { MemoryStore } from "./store.ts";
+
+export type Language = "zh" | "en";
+
+export interface DreamMaterialInput {
+  store: MemoryStore;
+  pendingTurns?: number;
+  days?: number;
+  language?: Language;
+}
+
+export async function buildDreamMaterial(input: DreamMaterialInput): Promise<string> {
   const days = input.days ?? 7;
   const recent = await input.store.recentDaily(days);
   const digest = input.store.digestTitles();
@@ -56,11 +63,9 @@ export const DREAM_RULES = [
  * an ordered decision list with concrete trigger phrases, not a taxonomy.
  * Order == severity: the first match wins. Both languages carry the same rules;
  * the trigger phrases are language-specific on purpose.
- * @typedef {"zh" | "en"} Language
  */
 
-/** @type {Record<Language, string>} */
-const KIND_RULES_TEXT = {
+const KIND_RULES_TEXT: Record<Language, string> = {
   zh: [
     "## 标注规则（决定热力图颜色）",
     "",
@@ -107,10 +112,7 @@ const KIND_RULES_TEXT = {
   ].join("\n"),
 };
 
-/**
- * @param {Language} [language]
- */
-export function kindRules(language = "zh") {
+export function kindRules(language: Language = "zh"): string {
   return KIND_RULES_TEXT[language === "en" ? "en" : "zh"];
 }
 
@@ -120,9 +122,8 @@ export const KIND_RULES = KIND_RULES_TEXT.zh;
 /**
  * The prompt used when a background agent performs the consolidation itself.
  * Kept here so the tool output and the scheduled task agree on the rules.
- * @param {string} material
  */
-export function dreamPrompt(material) {
+export function dreamPrompt(material: string): string {
   return [
     "You are consolidating long-term memory. Work in the files, then report.",
     "",

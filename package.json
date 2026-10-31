@@ -1,6 +1,6 @@
 {
   "name": "dsh-reme-lite",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "type": "module",
   "description": "ReMe-shaped long-term memory for DSH: Markdown workspace, BM25 recall, turn capture, scheduled consolidation",
   "author": {
@@ -15,17 +15,22 @@
   "bugs": {
     "url": "https://github.com/Nobodyanonymou-s/dsh-reme-lite/issues"
   },
-  "main": "./src/plugin.js",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
   "exports": {
-    ".": "./src/plugin.js",
-    "./client": "./client/client.js",
-    "./store": "./src/store.js",
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./store": "./lib/store.js",
     "./package.json": "./package.json"
   },
+  "bin": {
+    "memctl": "./lib/memctl.js"
+  },
   "files": [
-    "src",
-    "client",
-    "bin",
+    "lib",
     "cordis.patch.yml",
     "README.md",
     "docs",
@@ -47,12 +52,30 @@
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0",
-    "dsh": ">=0.2.0-rc.2"
+    "dsh": "^0.2.1-alpha.2"
   },
   "scripts": {
-    "test": "node --test --test-isolation=none test/*.test.js",
-    "demo": "node bin/memctl.js",
-    "pack": "npm pack --pack-destination ./dist"
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "pnpm typecheck && pnpm build && pnpm test",
+    "demo": "node lib/memctl.js",
+    "pack": "npm pack --pack-destination ./dist",
+    "prepare": "tsdown",
+    "prepack": "tsdown"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "3.18.5"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.5",
+    "@deepseek-ai/schemastery": "3.18.5",
+    "@types/node": "22.20.0",
+    "@types/react": "18.3.28",
+    "tsdown": "0.22.14",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
   },
   "keywords": [
     "dsh",

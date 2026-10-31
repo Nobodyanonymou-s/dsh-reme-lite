@@ -1,67 +1,76 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { mkdtemp, readFile, readdir, mkdir, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { it } from "vitest";
 
-import { apply, createUserMessage, hasGuidance, name, resolveLanguage, toJsonSchema, turnFromEvent } from "../src/plugin.js";
+import { apply, createUserMessage, hasGuidance, name, resolveLanguage, toJsonSchema, turnFromEvent } from "../src/index.ts";
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, 80));
+const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 80));
+
+/** The fakes mirror a host we do not have types for; every read off them is `any`. */
+type AnyRecord = Record<string, any>;
+
+interface FakeHost {
+  ctx: any;
+  tools: any[];
+  provided: Record<string, unknown>;
+  handlers: Map<string, Array<(...args: any[]) => void>>;
+}
 
 /** Minimal cordis-like context that records what the plugin registers. */
-function makeCtx(schedule) {
-  /** @type {Map<string, Function[]>} */
-  const handlers = new Map();
-  const tools = [];
-  const provided = {};
-  const ctx = {
+function makeCtx(schedule: unknown): FakeHost {
+  const handlers = new Map<string, Array<(...args: any[]) => void>>();
+  const tools: any[] = [];
+  const provided: Record<string, unknown> = {};
+  const ctx: any = {
     logger: { warn() {}, info() {} },
-    effect: (fn) => {
+    effect: (fn: () => void) => {
       fn();
       return () => {};
     },
-    on: (event, handler) => {
+    on: (event: string, handler: (...args: any[]) => void) => {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
       return () => {};
     },
-    provide: (key, value) => {
+    provide: (key: string, value: unknown) => {
       provided[key] = value;
     },
     tools: {
-      register: (tool) => {
+      register: (tool: unknown) => {
         tools.push(tool);
         return () => {};
       },
     },
     schedule,
-    emit(event, ...args) {
+    emit(event: string, ...args: any[]) {
       for (const handler of handlers.get(event) ?? []) handler(...args);
     },
   };
   return { ctx, tools, provided, handlers };
 }
 
-function fakeSchedule(initialRows = []) {
+function fakeSchedule(initialRows: any[] = []): any {
   const rows = [...initialRows];
-  const creates = [];
-  const deletes = [];
+  const creates: any[] = [];
+  const deletes: Array<{ sessionId: string; id: string }> = [];
   return {
     rows,
     creates,
     deletes,
-    async create(sessionId, request) {
+    async create(sessionId: string, request: unknown) {
       creates.push({ sessionId, request });
-      const record = { id: `schedule-${creates.length}`, ...request, sessionId };
+      const record = { id: `schedule-${creates.length}`, ...(request as AnyRecord), sessionId };
       rows.push(record);
       return record;
     },
-    async catalog() {
+    async catalog(): Promise<any[]> {
       return rows.map((row) => ({ ...row }));
     },
-    async delete({ sessionId, id }) {
+    async delete({ sessionId, id }: { sessionId: string; id: string }) {
       deletes.push({ sessionId, id });
-      const index = rows.findIndex((row) => row.id === id);
+      const index = rows.findIndex((row: AnyRecord) => row.id === id);
       if (index === -1) return { id, deleted: false, code: "schedule_not_found" };
       rows.splice(index, 1);
       return { id, deleted: true };
@@ -69,27 +78,43 @@ function fakeSchedule(initialRows = []) {
   };
 }
 
-function fakeAgent(sessionId, injected) {
+function fakeAgent(sessionId: string, injected: any[]) {
   return {
     session: { id: sessionId, header: { id: sessionId }, events: [] },
     inbox: { nextStep: [] },
-    inject: (message) => injected.push(message),
+    inject: (message: unknown) => injected.push(message),
   };
 }
 
-async function workspace() {
+async function workspace(): Promise<string> {
   return mkdtemp(join(tmpdir(), "mem-plugin-"));
 }
 
-test("plugin identity is declared and host packages are not imported", () => {
+it("plugin identity is declared and host packages are not imported", () => {
   assert.equal(name, "node-memory");
   // The plugin must stay import-clean: a bare `@deepseek-ai/*` specifier fails
   // to resolve when the Host mounts it by file path, before any code runs.
-  const source = readFileSync(new URL("../src/plugin.js", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /^import .*@deepseek-ai/m);
+  //
+  // Part 1 — source contract: a `@deepseek-ai` specifier may only appear on an
+  // `import type` line (erased at compile time) or inside the optional dynamic
+  // import of the schemastery schema; never as a runtime import.
+  const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /^import\s+(?!type\b)[^;]*@deepseek-ai/m);
+
+  // Part 2 — artifact contract: the built entry must keep the same promise, no
+  // matter how the bundler reshuffles it. The one allowed occurrence is the
+  // dynamic `import("@deepseek-ai/schemastery")` that resolves the optional
+  // Config schema; a static `from "@deepseek-ai/…"` is a packaging bug.
+  const artifact = new URL("../lib/index.js", import.meta.url);
+  assert.ok(existsSync(artifact), "lib/index.js missing — run pnpm build");
+  const built = readFileSync(artifact, "utf8");
+  const occurrences =
+    built.match(/from\s*["']@deepseek-ai[^"']*["']|import\s*\(\s*["']@deepseek-ai[^"']*["']/g) ?? [];
+  const offenders = occurrences.filter((occurrence) => !occurrence.includes('import("@deepseek-ai/schemastery"'));
+  assert.deepEqual(offenders, [], "the built plugin must not statically import a @deepseek-ai package");
 });
 
-test("inlined helpers match the Host contract", () => {
+it("inlined helpers match the Host contract", () => {
   // toJsonSchema: the authoring DSL the Host's defineTool compiles.
   const schema = toJsonSchema({
     query: { type: "string", required: true, description: "q" },
@@ -103,23 +128,28 @@ test("inlined helpers match the Host contract", () => {
   });
 
   // createUserMessage: frozen, cloned, role user, fresh id.
-  const message = createUserMessage({ content: [{ type: "text", text: "hi" }], source: { kind: "node-memory" } });
+  const message = createUserMessage({
+    content: [{ type: "text", text: "hi" }],
+    source: { kind: "node-memory" },
+  }) as { role: string; id: string; content: Array<{ type: string; text: string }> };
   assert.equal(message.role, "user");
   assert.equal(typeof message.id, "string");
   assert.ok(message.id.length > 10);
   assert.ok(Object.isFrozen(message));
+  const part = message.content[0];
+  assert.ok(part, "the cloned message keeps its single text part");
   assert.throws(() => {
-    message.content[0].text = "mutated";
+    part.text = "mutated";
   }, TypeError);
 });
 
-test("a fresh session gets guidance and binds a host reminder", async () => {
+it("a fresh session gets guidance and binds a host reminder", async () => {
   const root = await workspace();
   const schedule = fakeSchedule();
   const { ctx } = makeCtx(schedule);
   // `auto` follows the runner's locale; pin it so the assertions below mean
   // the same thing wherever the suite runs.
-  apply(ctx, {
+  apply(ctx as never, {
     workspace: root,
     dreamEnabled: true,
     dreamCron: "0 23 * * *",
@@ -128,7 +158,7 @@ test("a fresh session gets guidance and binds a host reminder", async () => {
   });
   await settle();
 
-  const injected = [];
+  const injected: any[] = [];
   const agent = fakeAgent("session-1", injected);
   ctx.emit("agent/created", { agent });
   await settle();
@@ -145,27 +175,31 @@ test("a fresh session gets guidance and binds a host reminder", async () => {
   assert.equal(injected[0].source.kind, "node-memory");
 });
 
-test("guidance is injected once per session", async () => {
+it("guidance is injected once per session", async () => {
   const root = await workspace();
   const { ctx } = makeCtx(fakeSchedule());
-  apply(ctx, { workspace: root, dreamEnabled: false });
+  apply(ctx as never, { workspace: root, dreamEnabled: false });
   await settle();
 
   // One persisted session, two agent constructions over it: exactly what a
   // resume looks like. The second must not re-inject.
-  const session = { id: "session-2", header: { id: "session-2" }, events: [] };
-  const first = [];
+  const session: { id: string; header: { id: string }; events: any[] } = {
+    id: "session-2",
+    header: { id: "session-2" },
+    events: [],
+  };
+  const first: any[] = [];
   ctx.emit("agent/created", {
-    agent: { session, inbox: { nextStep: [] }, inject: (message) => first.push(message) },
+    agent: { session, inbox: { nextStep: [] }, inject: (message: unknown) => first.push(message) },
   });
   await settle();
   assert.equal(first.length, 1, "first construction injects guidance");
 
   // `user/message` carries the message itself as the event payload.
   session.events = first.map((message) => ({ type: "user/message", data: message }));
-  const second = [];
+  const second: any[] = [];
   ctx.emit("agent/created", {
-    agent: { session, inbox: { nextStep: [] }, inject: (message) => second.push(message) },
+    agent: { session, inbox: { nextStep: [] }, inject: (message: unknown) => second.push(message) },
   });
   await settle();
 
@@ -173,7 +207,7 @@ test("guidance is injected once per session", async () => {
   assert.equal(second.length, 0, "resumed session is not re-injected");
 });
 
-test("switching off removes the host reminder but keeps the task record", async () => {
+it("switching off removes the host reminder but keeps the task record", async () => {
   const root = await workspace();
   await mkdir(join(root, "metadata"), { recursive: true });
   await writeFile(
@@ -200,7 +234,7 @@ test("switching off removes the host reminder but keeps the task record", async 
     },
   ]);
   const { ctx } = makeCtx(schedule);
-  apply(ctx, { workspace: root, dreamEnabled: false });
+  apply(ctx as never, { workspace: root, dreamEnabled: false });
   await settle();
 
   assert.equal(schedule.deletes.length, 1, "the delivery arm is removed");
@@ -213,10 +247,10 @@ test("switching off removes the host reminder but keeps the task record", async 
   assert.ok(state.pausedAt, "pausing is timestamped");
 });
 
-test("turns are captured, plugin messages are not", async () => {
+it("turns are captured, plugin messages are not", async () => {
   const root = await workspace();
   const { ctx } = makeCtx(fakeSchedule());
-  apply(ctx, { workspace: root, dreamEnabled: false, captureInterval: 1 });
+  apply(ctx as never, { workspace: root, dreamEnabled: false, captureInterval: 1 });
   await settle();
 
   const session = { id: "session-3", header: { id: "session-3" } };
@@ -242,20 +276,22 @@ test("turns are captured, plugin messages are not", async () => {
   const dir = join(root, "session", "dialog");
   const files = await readdir(dir);
   assert.equal(files.length, 1);
-  const text = await readFile(join(dir, files[0]), "utf8");
+  const written = files[0];
+  assert.ok(written, "exactly one turn file was written");
+  const text = await readFile(join(dir, written), "utf8");
   assert.match(text, /部署窗口是周五下午四点/);
   assert.match(text, /记下了/, "assistant text lives under data.message");
   assert.doesNotMatch(text, /插件注入的守则/);
 });
 
-test("memory_search returns line-ranged evidence for written nodes", async () => {
+it("memory_search returns line-ranged evidence for written nodes", async () => {
   const root = await workspace();
   const { ctx, tools } = makeCtx(fakeSchedule());
-  apply(ctx, { workspace: root, dreamEnabled: false });
+  apply(ctx as never, { workspace: root, dreamEnabled: false });
   await settle();
 
-  const write = tools.find((tool) => tool.name === "memory_write");
-  const search = tools.find((tool) => tool.name === "memory_search");
+  const write = tools.find((tool: any) => tool.name === "memory_write");
+  const search = tools.find((tool: any) => tool.name === "memory_search");
   assert.ok(write && search);
 
   const wrote = await write.execute(
@@ -276,14 +312,14 @@ test("memory_search returns line-ranged evidence for written nodes", async () =>
   assert.equal(empty, "No relevant memory found.");
 });
 
-test("memory_schedule reports the switch and refuses to diverge from it", async () => {
+it("memory_schedule reports the switch and refuses to diverge from it", async () => {
   const root = await workspace();
   const schedule = fakeSchedule();
   const { ctx, tools } = makeCtx(schedule);
-  apply(ctx, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *" });
+  apply(ctx as never, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *" });
   await settle();
 
-  const tool = tools.find((item) => item.name === "memory_schedule");
+  const tool = tools.find((item: any) => item.name === "memory_schedule");
   const agent = fakeAgent("session-4", []);
   ctx.emit("agent/created", { agent });
   await settle();
@@ -298,18 +334,15 @@ test("memory_schedule reports the switch and refuses to diverge from it", async 
   assert.equal(schedule.deletes.length, 0, "refusal must not mutate the Host");
 });
 
-test("memory_dream delivers material and consumes queued requests", async () => {
+it("memory_dream delivers material and consumes queued requests", async () => {
   const root = await workspace();
   const { ctx, tools } = makeCtx(fakeSchedule());
-  apply(ctx, { workspace: root, dreamEnabled: false, language: "zh" });
+  apply(ctx as never, { workspace: root, dreamEnabled: false, language: "zh" });
   await settle();
 
-  const write = tools.find((tool) => tool.name === "memory_write");
-  const dream = tools.find((tool) => tool.name === "memory_dream");
-  await write.execute(
-    { path: "daily/2026-10-24.md", content: "# 10-24\n\n周报用 Markdown。" },
-    {},
-  );
+  const write = tools.find((tool: any) => tool.name === "memory_write");
+  const dream = tools.find((tool: any) => tool.name === "memory_dream");
+  await write.execute({ path: "daily/2026-10-24.md", content: "# 10-24\n\n周报用 Markdown。" }, {});
 
   // Simulate the timer fallback having queued a request earlier.
   await mkdir(join(root, "metadata", "dream-queue"), { recursive: true });
@@ -331,24 +364,24 @@ test("memory_dream delivers material and consumes queued requests", async () => 
   assert.deepEqual(await readdir(join(root, "metadata", "dream-queue")), []);
 });
 
-test("status distinguishes 'no reminder yet' from 'switch is off'", async () => {
+it("status distinguishes 'no reminder yet' from 'switch is off'", async () => {
   const root = await workspace();
   const { ctx, tools } = makeCtx(fakeSchedule());
-  apply(ctx, { workspace: root, dreamEnabled: false });
+  apply(ctx as never, { workspace: root, dreamEnabled: false });
   await settle();
 
   const status = await tools
-    .find((item) => item.name === "memory_schedule")
+    .find((item: any) => item.name === "memory_schedule")
     .execute({ action: "status" }, { agent: fakeAgent("session-6", []) });
 
   assert.match(status, /switch \(config dreamEnabled\): false/);
   assert.match(status, /switch is off; the task record is kept/);
 });
 
-test("no schedule service degrades to the local timer path", async () => {
+it("no schedule service degrades to the local timer path", async () => {
   const root = await workspace();
   const { ctx, tools } = makeCtx(undefined);
-  apply(ctx, { workspace: root, dreamEnabled: true });
+  apply(ctx as never, { workspace: root, dreamEnabled: true });
   await settle();
 
   const agent = fakeAgent("session-5", []);
@@ -356,12 +389,12 @@ test("no schedule service degrades to the local timer path", async () => {
   await settle();
 
   const status = await tools
-    .find((item) => item.name === "memory_schedule")
+    .find((item: any) => item.name === "memory_schedule")
     .execute({ action: "status" }, { agent });
   assert.match(status, /no schedule service/);
 });
 
-test("turnFromEvent handles both message envelopes", () => {
+it("turnFromEvent handles both message envelopes", () => {
   assert.equal(turnFromEvent({ type: "tool/call", data: {} }), null);
   assert.equal(
     turnFromEvent({ type: "user/message", data: { source: { kind: "node-memory" }, text: "x" } }),
@@ -383,7 +416,7 @@ test("turnFromEvent handles both message envelopes", () => {
   assert.deepEqual(assistant, { role: "assistant", text: "答", at: "2026-10-25T00:00:01.000Z" });
 });
 
-test("working language follows the system unless pinned", () => {
+it("working language follows the system unless pinned", () => {
   assert.equal(resolveLanguage("zh", {}), "zh");
   assert.equal(resolveLanguage("en", {}), "en");
   assert.equal(resolveLanguage("auto", { LC_ALL: "zh_CN.UTF-8" }), "zh");
@@ -391,7 +424,7 @@ test("working language follows the system unless pinned", () => {
   assert.equal(resolveLanguage(undefined, { LC_ALL: "zh_CN.UTF-8" }), "zh");
 });
 
-test("a new session takes the reminder over from the session that enabled it", async () => {
+it("a new session takes the reminder over from the session that enabled it", async () => {
   const root = await workspace();
   const schedule = fakeSchedule([
     {
@@ -403,7 +436,7 @@ test("a new session takes the reminder over from the session that enabled it", a
     },
   ]);
   const { ctx } = makeCtx(schedule);
-  apply(ctx, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *", dreamTimeZone: "Asia/Shanghai" });
+  apply(ctx as never, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *", dreamTimeZone: "Asia/Shanghai" });
   await settle();
 
   // A reminder left on the old session is invisible from here: the Host only
@@ -413,7 +446,7 @@ test("a new session takes the reminder over from the session that enabled it", a
 
   assert.equal(schedule.creates.length, 1, "one reminder is bound to the new session");
   assert.equal(schedule.creates[0].sessionId, "session-new");
-  assert.deepEqual(schedule.rows.map((row) => row.sessionId), ["session-new"], "the old row is gone");
+  assert.deepEqual(schedule.rows.map((row: AnyRecord) => row.sessionId), ["session-new"], "the old row is gone");
   assert.deepEqual(schedule.deletes, [{ sessionId: "session-old", id: "schedule-old" }]);
 
   // Re-entering the same session must not churn the delivery arm.
@@ -423,7 +456,7 @@ test("a new session takes the reminder over from the session that enabled it", a
   assert.equal(schedule.deletes.length, 1);
 });
 
-test("the move keeps the old row when binding fails", async () => {
+it("the move keeps the old row when binding fails", async () => {
   const root = await workspace();
   const schedule = fakeSchedule([
     { id: "schedule-old", sessionId: "session-old", title: "记忆整理", prompt: "[[node-memory:dream]] x" },
@@ -432,17 +465,17 @@ test("the move keeps the old row when binding fails", async () => {
     throw new Error("host refused");
   };
   const { ctx } = makeCtx(schedule);
-  apply(ctx, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *" });
+  apply(ctx as never, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *" });
   await settle();
 
   ctx.emit("agent/created", { agent: fakeAgent("session-new", []) });
   await settle();
 
   assert.equal(schedule.deletes.length, 0, "no delivery arm is lost when the new one cannot be created");
-  assert.deepEqual(schedule.rows.map((row) => row.id), ["schedule-old"]);
+  assert.deepEqual(schedule.rows.map((row: AnyRecord) => row.id), ["schedule-old"]);
 });
 
-test("memory_dream records the scheduled occurrence it was asked to run", async () => {
+it("memory_dream records the scheduled occurrence it was asked to run", async () => {
   const root = await workspace();
   await mkdir(join(root, "metadata"), { recursive: true });
   await writeFile(
@@ -462,7 +495,7 @@ test("memory_dream records the scheduled occurrence it was asked to run", async 
   );
 
   const { ctx, tools } = makeCtx(fakeSchedule());
-  apply(ctx, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *", dreamTimeZone: "Asia/Shanghai" });
+  apply(ctx as never, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *", dreamTimeZone: "Asia/Shanghai" });
   await settle();
 
   const reminder = {
@@ -478,9 +511,13 @@ test("memory_dream records the scheduled occurrence it was asked to run", async 
       ],
     },
   };
-  const agent = { session: { id: "session-7", header: { id: "session-7" }, events: [reminder] }, inbox: { nextStep: [] }, inject() {} };
+  const agent = {
+    session: { id: "session-7", header: { id: "session-7" }, events: [reminder] },
+    inbox: { nextStep: [] },
+    inject() {},
+  };
 
-  const dream = tools.find((item) => item.name === "memory_dream");
+  const dream = tools.find((item: any) => item.name === "memory_dream");
   await dream.execute({}, { agent });
 
   const state = JSON.parse(await readFile(join(root, "metadata", "dream-task.json"), "utf8"));
@@ -497,7 +534,7 @@ test("memory_dream records the scheduled occurrence it was asked to run", async 
   assert.equal(after.runs.length, 1);
 });
 
-test("status says where the reminder is bound and when it last fired", async () => {
+it("status says where the reminder is bound and when it last fired", async () => {
   const root = await workspace();
   const schedule = fakeSchedule([
     {
@@ -513,25 +550,25 @@ test("status says where the reminder is bound and when it last fired", async () 
     },
   ]);
   const { ctx, tools } = makeCtx(schedule);
-  apply(ctx, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *" });
+  apply(ctx as never, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *" });
   await settle();
 
   const agent = fakeAgent("session-4", []);
   ctx.emit("agent/created", { agent });
   await settle();
 
-  const status = await tools.find((item) => item.name === "memory_schedule").execute({ action: "status" }, { agent });
+  const status = await tools.find((item: any) => item.name === "memory_schedule").execute({ action: "status" }, { agent });
   assert.match(status, /session 4 \(this session\)/, "the bound session is short and marked as this one");
   assert.match(status, /delivered 2026-10-28T15:00:00\.194Z/);
 });
 
-test("memory_write dates the node so it shows on the heatmap", async () => {
+it("memory_write dates the node so it shows on the heatmap", async () => {
   const root = await workspace();
   const { ctx, tools } = makeCtx(fakeSchedule());
-  apply(ctx, { workspace: root, dreamEnabled: false });
+  apply(ctx as never, { workspace: root, dreamEnabled: false });
   await settle();
 
-  const write = tools.find((item) => item.name === "memory_write");
+  const write = tools.find((item: any) => item.name === "memory_write");
   await write.execute({ path: "digest/wiki/dated.md", content: "# dated", kind: "conflict" }, {});
 
   const text = await readFile(join(root, "digest/wiki/dated.md"), "utf8");
@@ -540,7 +577,7 @@ test("memory_write dates the node so it shows on the heatmap", async () => {
   assert.match(text, /kind: conflict/);
 });
 
-test("an occurrence without a timestamp falls back to the event time", async () => {
+it("an occurrence without a timestamp falls back to the event time", async () => {
   const root = await workspace();
   await mkdir(join(root, "metadata"), { recursive: true });
   await writeFile(
@@ -558,7 +595,7 @@ test("an occurrence without a timestamp falls back to the event time", async () 
     "utf8",
   );
   const { ctx, tools } = makeCtx(fakeSchedule());
-  apply(ctx, { workspace: root, dreamEnabled: false });
+  apply(ctx as never, { workspace: root, dreamEnabled: false });
   await settle();
 
   // The occurrence instant normally rides in reminders_json; an older Host
@@ -576,43 +613,47 @@ test("an occurrence without a timestamp falls back to the event time", async () 
       ],
     },
   };
-  const agent = { session: { id: "session-9", header: { id: "session-9" }, events: [reminder] }, inbox: { nextStep: [] }, inject() {} };
-  await tools.find((item) => item.name === "memory_dream").execute({}, { agent });
+  const agent = {
+    session: { id: "session-9", header: { id: "session-9" }, events: [reminder] },
+    inbox: { nextStep: [] },
+    inject() {},
+  };
+  await tools.find((item: any) => item.name === "memory_dream").execute({}, { agent });
 
   const state = JSON.parse(await readFile(join(root, "metadata", "dream-task.json"), "utf8"));
   assert.equal(state.runs.length, 1, "the run is still recorded");
   assert.match(state.runs[0].detail, /2026-10-28T15:00:00\.900Z/, "the event time stands in");
 });
 
-test("a stale row that fails to delete does not block the others", async () => {
+it("a stale row that fails to delete does not block the others", async () => {
   const root = await workspace();
   const schedule = fakeSchedule([
     { id: "schedule-stuck", sessionId: "session-stuck", title: "记忆整理", prompt: "[[node-memory:dream]] x" },
     { id: "schedule-loose", sessionId: "session-loose", title: "记忆整理", prompt: "[[node-memory:dream]] x" },
   ]);
   const realDelete = schedule.delete;
-  schedule.delete = async (args) => {
+  schedule.delete = async (args: { id: string }) => {
     if (args.id === "schedule-stuck") throw new Error("host wedged");
     return realDelete(args);
   };
   const { ctx } = makeCtx(schedule);
-  apply(ctx, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *" });
+  apply(ctx as never, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *" });
   await settle();
 
   ctx.emit("agent/created", { agent: fakeAgent("session-new", []) });
   await settle();
 
   assert.deepEqual(
-    schedule.rows.map((row) => row.id).sort(),
+    schedule.rows.map((row: AnyRecord) => row.id).sort(),
     ["schedule-1", "schedule-stuck"],
     "the loose row is gone; the new binding and the wedged row remain",
   );
 });
 
-test("the consumed note follows the pinned language", async () => {
+it("the consumed note follows the pinned language", async () => {
   const root = await workspace();
   const { ctx, tools } = makeCtx(fakeSchedule());
-  apply(ctx, { workspace: root, dreamEnabled: false, language: "en" });
+  apply(ctx as never, { workspace: root, dreamEnabled: false, language: "en" });
   await settle();
 
   await mkdir(join(root, "metadata", "dream-queue"), { recursive: true });
@@ -622,11 +663,11 @@ test("the consumed note follows the pinned language", async () => {
     "utf8",
   );
 
-  const material = await tools.find((item) => item.name === "memory_dream").execute({}, {});
+  const material = await tools.find((item: any) => item.name === "memory_dream").execute({}, {});
   assert.match(material, /\(1 pending consolidation request\(s\) consumed\.\)/);
 });
 
-test("a host delivery record credits the scheduled run without session history", async () => {
+it("a host delivery record credits the scheduled run without session history", async () => {
   const root = await workspace();
   await mkdir(join(root, "metadata"), { recursive: true });
   await writeFile(
@@ -659,13 +700,17 @@ test("a host delivery record credits the scheduled run without session history",
     },
   ]);
   const { ctx, tools } = makeCtx(schedule);
-  apply(ctx, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *", dreamTimeZone: "Asia/Shanghai" });
+  apply(ctx as never, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *", dreamTimeZone: "Asia/Shanghai" });
   await settle();
 
   // A session snapshot inside a tool call does not necessarily carry the event
   // history, so the Host's delivery record is what proves the run happened.
-  const agent = { session: { id: "session-9", header: { id: "session-9" }, events: [] }, inbox: { nextStep: [] }, inject() {} };
-  await tools.find((item) => item.name === "memory_dream").execute({}, { agent });
+  const agent = {
+    session: { id: "session-9", header: { id: "session-9" }, events: [] },
+    inbox: { nextStep: [] },
+    inject() {},
+  };
+  await tools.find((item: any) => item.name === "memory_dream").execute({}, { agent });
 
   const state = JSON.parse(await readFile(join(root, "metadata", "dream-task.json"), "utf8"));
   assert.equal(state.runs.length, 1);
@@ -673,4 +718,3 @@ test("a host delivery record credits the scheduled run without session history",
   assert.equal(state.lastStatus, "ok");
   assert.equal(state.nextRunAt, "2026-10-30T15:00:00.000Z", "the next run follows the delivered occurrence");
 });
-

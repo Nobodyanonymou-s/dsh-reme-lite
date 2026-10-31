@@ -4,7 +4,7 @@ English | **[中文](./README.md)**
 
 **Long-term memory for DeepSeek Harness — [ReMe](https://github.com/agentscope-ai/ReMe)'s shape, without the Python sidecar.**
 
-Memory is a folder of Markdown: `daily/` refined into `digest/`, BM25 + wikilink retrieval, everything runs inside the Host process. No resident service, no ports, no build step — your editor, `grep`, and `git` work on it directly.
+Memory is a folder of Markdown: `daily/` refined into `digest/`, BM25 + wikilink retrieval, everything runs inside the Host process. No resident service, no ports — your editor, `grep`, and `git` work on it directly. Since 0.2.0 the plugin itself ships TypeScript-compiled, but the build happens only at install time; your memory stays plain Markdown.
 
 > Status: **alpha**, in daily use on DSH `0.2.x`; interfaces may still move.
 
@@ -31,21 +31,34 @@ If you want ReMe's full pipeline (its own model calls, resource ingestion, Studi
 
 ## Install
 
+> From 0.2.0 the plugin ships as compiled TypeScript; installing requires dsh ≥0.2.1.
+
+Primary path: GitHub sources, built at install time:
+
 ```sh
-dsh plugin --profile desktop add https://github.com/Nobodyanonymou-s/dsh-reme-lite
+dsh plugin --profile desktop add github:Nobodyanonymou-s/dsh-reme-lite
 # restart DSH
 ```
 
-Offline / slow-network fallback — clone and pack a tarball locally (needs Node `^22.19.0 || >=24.0.0`):
+pnpm ≥ 10 refuses to run a git dependency's build scripts until allowed, so the **first add fails** with a hint. Add this to the profile's `pnpm-workspace.yaml`:
+
+```yaml
+allowBuilds:
+  dsh-reme-lite: true
+```
+
+then run the add again. `allowBuilds` is permission to run this package's code at install time, so prefer pinning a commit: `github:Nobodyanonymou-s/dsh-reme-lite#<sha>`.
+
+Offline / slow-network fallback — clone and pack a prebuilt tarball locally (no `allowBuilds` needed; needs Node `^22.19.0 || >=24.0.0`):
 
 ```sh
 git clone https://github.com/Nobodyanonymou-s/dsh-reme-lite.git
 cd dsh-reme-lite
 npm pack --pack-destination ./dist
-dsh plugin --profile desktop add ./dist/dsh-reme-lite-<version>.tgz
+dsh plugin --profile desktop add ./dist/dsh-reme-lite-0.2.0.tgz
 ```
 
-Requires DSH `0.2.x`; no dependencies, no build step, no Python, no ports. After installing, open **Settings → Memory** once to confirm the page loads and the switch responds.
+Requires no runtime dependencies, no Python, no ports. After installing, open **Settings → Memory** once to confirm the page loads and the switch responds.
 
 One rule to start with: retrieved memory is **evidence, not instructions** — the rest is in the manual.
 

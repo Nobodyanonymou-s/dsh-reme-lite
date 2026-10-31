@@ -4,13 +4,13 @@
  * truth, the index is derived" contract without any Python.
  */
 
-/** @typedef {{ data: Record<string, string>, body: string, offset: number }} Parsed */
+export interface Parsed {
+  data: Record<string, string>;
+  body: string;
+  offset: number;
+}
 
-/**
- * @param {string} value
- * @returns {string}
- */
-function unquote(value) {
+function unquote(value: string): string {
   const v = value.trim();
   if (
     (v.startsWith('"') && v.endsWith('"') && v.length >= 2) ||
@@ -25,74 +25,93 @@ function unquote(value) {
  * Split leading YAML frontmatter from the body.
  * `offset` is the number of file lines the frontmatter occupies, so a body
  * line `i` (0-based) is file line `offset + i + 1`.
- * @param {string} text
- * @returns {Parsed}
  */
-export function parseFrontmatter(text) {
+export function parseFrontmatter(text: string): Parsed {
   const lines = text.split("\n");
   if (lines[0]?.trim() !== "---") return { data: {}, body: text, offset: 0 };
   let end = -1;
   for (let i = 1; i < lines.length; i += 1) {
-    if (lines[i].trim() === "---") {
+    if (lines[i]?.trim() === "---") {
       end = i;
       break;
     }
   }
   if (end === -1) return { data: {}, body: text, offset: 0 };
-  /** @type {Record<string, string>} */
-  const data = {};
+  const data: Record<string, string> = {};
   for (const line of lines.slice(1, end)) {
     const m = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line);
-    if (m) data[m[1]] = unquote(m[2]);
+    if (m?.[1] && m[2] !== undefined) data[m[1]] = unquote(m[2]);
   }
   return { data, body: lines.slice(end + 1).join("\n"), offset: end + 1 };
 }
 
-/**
- * @typedef {{ heading: string, startLine: number, endLine: number, text: string }} Chunk
- */
+export interface Chunk {
+  heading: string;
+  startLine: number;
+  endLine: number;
+  text: string;
+}
+
+export interface ChunkOptions {
+  maxChars?: number;
+  withFrontmatter?: boolean;
+}
+
+interface Section {
+  heading: string;
+  start: number;
+  lines: string[];
+}
+
+interface Block {
+  start: number;
+  lines: string[];
+}
+
+interface ChunkAcc {
+  heading: string;
+  start: number;
+  end: number;
+  text: string;
+}
 
 /**
  * Chunk a Markdown document by heading, then merge small blocks up to
  * `maxChars`. Line ranges are 1-based and point at the original file,
  * frontmatter included.
- * @param {string} text
- * @param {{ maxChars?: number, withFrontmatter?: boolean }} [options]
- * @returns {Chunk[]}
  */
-export function chunkMarkdown(text, options = {}) {
+export function chunkMarkdown(text: string, options: ChunkOptions = {}): Chunk[] {
   const maxChars = options.maxChars ?? 900;
   const withFrontmatter = options.withFrontmatter ?? true;
   const { data, body, offset } = parseFrontmatter(text);
   const lines = body.split("\n");
   const lineOffset = withFrontmatter ? offset : 0;
 
-  /** @type {{ heading: string, start: number, lines: string[] }[]} */
-  const sections = [];
-  let current = { heading: "", start: 0, lines: [] };
+  const sections: Section[] = [];
+  let current: Section = { heading: "", start: 0, lines: [] };
   for (let i = 0; i < lines.length; i += 1) {
-    const m = /^(#{1,6})\s+(.+?)\s*$/.exec(lines[i]);
-    if (m) {
-      if (current.lines.some((line) => line.trim())) sections.push(current);
-      current = { heading: m[2], start: i, lines: [lines[i]] };
+    const line = lines[i];
+    if (line === undefined) continue;
+    const m = /^(#{1,6})\s+(.+?)\s*$/.exec(line);
+    if (m?.[2]) {
+      if (current.lines.some((l) => l.trim())) sections.push(current);
+      current = { heading: m[2], start: i, lines: [line] };
     } else {
-      current.lines.push(lines[i]);
+      current.lines.push(line);
     }
   }
-  if (current.lines.some((line) => line.trim())) sections.push(current);
+  if (current.lines.some((l) => l.trim())) sections.push(current);
 
-  /** @type {Chunk[]} */
-  const chunks = [];
+  const chunks: Chunk[] = [];
   for (const section of sections) {
     // A node whose body starts straight with prose has no heading; fall back to
     // the frontmatter name so evidence still shows a topic.
     const heading = section.heading || data.name || "";
-    /** @type {{ start: number, lines: string[] }[]} */
-    const blocks = [];
-    /** @type {{ start: number, lines: string[] } | null} */
-    let block = null;
+    const blocks: Block[] = [];
+    let block: Block | null = null;
     for (let j = 0; j < section.lines.length; j += 1) {
       const line = section.lines[j];
+      if (line === undefined) continue;
       if (!line.trim()) {
         if (block) {
           blocks.push(block);
@@ -107,8 +126,7 @@ export function chunkMarkdown(text, options = {}) {
     }
     if (block) blocks.push(block);
 
-    /** @type {{ heading: string, start: number, end: number, text: string } | null} */
-    let acc = null;
+    let acc: ChunkAcc | null = null;
     for (const b of blocks) {
       const blockText = b.lines.join("\n");
       const end = b.start + b.lines.length - 1;
@@ -130,12 +148,7 @@ export function chunkMarkdown(text, options = {}) {
   return chunks;
 }
 
-/**
- * @param {{ heading: string, start: number, end: number, text: string }} acc
- * @param {number} lineOffset
- * @returns {Chunk}
- */
-function toChunk(acc, lineOffset) {
+function toChunk(acc: ChunkAcc, lineOffset: number): Chunk {
   // A chunk made only of its heading line is still useful: it anchors the
   // topic. Keep the heading text but do not let it dominate scoring.
   return {
@@ -148,15 +161,12 @@ function toChunk(acc, lineOffset) {
 
 /**
  * Extract `[[target]]` / `[[target|label]]` / `[[target#section]]` targets.
- * @param {string} text
- * @returns {string[]}
  */
-export function extractWikilinks(text) {
-  /** @type {Set<string>} */
-  const out = new Set();
+export function extractWikilinks(text: string): string[] {
+  const out = new Set<string>();
   const re = /\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g;
   let m = re.exec(text);
-  while (m) {
+  while (m?.[1]) {
     out.add(m[1].trim());
     m = re.exec(text);
   }
@@ -166,10 +176,8 @@ export function extractWikilinks(text) {
 /**
  * Normalize a link target or file path into a lookup key: lowercase,
  * forward slashes, no leading `./`, no `.md` suffix.
- * @param {string} value
- * @returns {string}
  */
-export function linkKey(value) {
+export function linkKey(value: string): string {
   return value
     .trim()
     .replace(/\\/g, "/")
@@ -178,13 +186,18 @@ export function linkKey(value) {
     .toLowerCase();
 }
 
+export interface NodeMeta {
+  name?: string;
+  description?: string;
+  updated?: string;
+  tags?: string[];
+  kind?: string;
+}
+
 /**
  * Render a memory node with frontmatter.
- * @param {{ name?: string, description?: string, updated?: string, tags?: string[], kind?: string }} meta
- * @param {string} body
- * @returns {string}
  */
-export function renderNode(meta, body) {
+export function renderNode(meta: NodeMeta, body: string): string {
   const fields = ["---"];
   if (meta.name) fields.push(`name: ${meta.name}`);
   if (meta.description) fields.push(`description: ${meta.description}`);

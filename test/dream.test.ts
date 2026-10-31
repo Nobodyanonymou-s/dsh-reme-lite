@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { it } from "vitest";
 
-import { buildDreamMaterial, DREAM_RULES, KIND_RULES, dreamPrompt, kindRules } from "../src/dream.js";
-import { DreamQueue } from "../src/dream-queue.js";
-import { MemoryStore } from "../src/store.js";
+import { buildDreamMaterial, DREAM_RULES, KIND_RULES, dreamPrompt, kindRules } from "../src/dream.ts";
+import { DreamQueue } from "../src/dream-queue.ts";
+import { MemoryStore } from "../src/store.ts";
 
-async function workspace() {
+async function workspace(): Promise<{ root: string; store: MemoryStore }> {
   const root = await mkdtemp(join(tmpdir(), "mem-dream-"));
   const store = new MemoryStore({ root });
   await store.write({
@@ -22,7 +22,7 @@ async function workspace() {
   return { root, store };
 }
 
-test("material lists what exists and what to do", async () => {
+it("material lists what exists and what to do", async () => {
   const { store } = await workspace();
   const material = await buildDreamMaterial({ store, pendingTurns: 3, days: 7 });
   assert.match(material, /Recent daily pages/);
@@ -34,7 +34,7 @@ test("material lists what exists and what to do", async () => {
   assert.ok(KIND_RULES.indexOf("conflict") < KIND_RULES.indexOf("user-declared"), "rubric is ordered by severity");
 });
 
-test("material degrades to explicit empty sections", async () => {
+it("material degrades to explicit empty sections", async () => {
   const root = await mkdtemp(join(tmpdir(), "mem-empty-"));
   const store = new MemoryStore({ root });
   await store.rebuild();
@@ -43,13 +43,13 @@ test("material degrades to explicit empty sections", async () => {
   assert.match(material, /Existing digest nodes\n- \(none\)/);
 });
 
-test("the agent prompt embeds the material and forbids questions", () => {
+it("the agent prompt embeds the material and forbids questions", () => {
   const prompt = dreamPrompt("MATERIAL");
   assert.ok(prompt.includes("MATERIAL"));
   assert.match(prompt, /Do not ask questions/);
 });
 
-test("queue is FIFO and survives reload", async () => {
+it("queue is FIFO and survives reload", async () => {
   const { root } = await workspace();
   const queue = new DreamQueue({ root });
   const first = await queue.push({ material: "a", at: new Date("2026-10-25T00:00:00Z") });
@@ -58,10 +58,13 @@ test("queue is FIFO and survives reload", async () => {
   const reopened = new DreamQueue({ root });
   const list = await reopened.list();
   assert.equal(list.length, 2);
-  assert.equal(list[0].id, first.id);
-  assert.equal(list[0].material, "a");
+  const firstEntry = list[0];
+  assert.ok(firstEntry, "the oldest request survives the reload");
+  assert.equal(firstEntry.id, first.id);
+  assert.equal(firstEntry.material, "a");
 
   const head = await reopened.peek();
+  assert.ok(head, "peek returns the oldest request");
   assert.equal(head.material, "a");
   assert.equal(await reopened.remove(head.id), true);
   assert.equal((await reopened.list()).length, 1);
@@ -69,7 +72,7 @@ test("queue is FIFO and survives reload", async () => {
   assert.equal(await reopened.size(), 0);
 });
 
-test("an empty queue reads as zero, not an error", async () => {
+it("an empty queue reads as zero, not an error", async () => {
   const root = await mkdtemp(join(tmpdir(), "mem-noqueue-"));
   const queue = new DreamQueue({ root });
   assert.deepEqual(await queue.list(), []);
@@ -77,7 +80,7 @@ test("an empty queue reads as zero, not an error", async () => {
   assert.equal(await queue.size(), 0);
 });
 
-test("the colour rubric exists in both working languages", () => {
+it("the colour rubric exists in both working languages", () => {
   const en = kindRules("en");
   assert.match(en, /conflict/);
   assert.match(en, /purple user-declared/);

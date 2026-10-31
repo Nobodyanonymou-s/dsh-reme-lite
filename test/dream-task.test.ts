@@ -2,16 +2,16 @@ import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { it } from "vitest";
 
-import { DreamTaskStore, defaultState } from "../src/dream-task.js";
+import { DreamTaskStore, defaultState } from "../src/dream-task.ts";
 
-async function store() {
+async function store(): Promise<{ root: string; tasks: DreamTaskStore }> {
   const root = await mkdtemp(join(tmpdir(), "mem-task-"));
   return { root, tasks: new DreamTaskStore({ root }) };
 }
 
-test("a missing task file yields a disabled default", async () => {
+it("a missing task file yields a disabled default", async () => {
   const { tasks } = await store();
   const state = await tasks.load();
   assert.equal(state.enabled, false);
@@ -19,7 +19,7 @@ test("a missing task file yields a disabled default", async () => {
   assert.deepEqual(state.runs, []);
 });
 
-test("enable creates the task with a computed next run", async () => {
+it("enable creates the task with a computed next run", async () => {
   const { tasks } = await store();
   const state = await tasks.enable({
     cron: "0 23 * * *",
@@ -32,7 +32,7 @@ test("enable creates the task with a computed next run", async () => {
   assert.equal(state.pausedAt, null);
 });
 
-test("disable pauses without deleting history", async () => {
+it("disable pauses without deleting history", async () => {
   const { tasks } = await store();
   await tasks.enable({ from: new Date("2026-10-25T10:00:00Z") });
   await tasks.recordRun({ status: "ok", detail: "4 files" });
@@ -53,7 +53,7 @@ test("disable pauses without deleting history", async () => {
   assert.equal(again.runs.length, 1);
 });
 
-test("runs are recorded, trimmed and advance the schedule", async () => {
+it("runs are recorded, trimmed and advance the schedule", async () => {
   const { tasks } = await store();
   await tasks.enable({ from: new Date("2026-10-25T10:00:00Z") });
   const state = await tasks.recordRun({
@@ -73,7 +73,7 @@ test("runs are recorded, trimmed and advance the schedule", async () => {
   assert.equal(trimmed.runs.length, 20);
 });
 
-test("failures keep the error and the task stays enabled", async () => {
+it("failures keep the error and the task stays enabled", async () => {
   const { tasks } = await store();
   await tasks.enable({ from: new Date("2026-10-25T10:00:00Z") });
   const state = await tasks.recordRun({ status: "error", detail: "agent unavailable" });
@@ -82,7 +82,7 @@ test("failures keep the error and the task stays enabled", async () => {
   assert.equal(state.lastError, "agent unavailable");
 });
 
-test("a corrupt task file degrades to disabled instead of throwing", async () => {
+it("a corrupt task file degrades to disabled instead of throwing", async () => {
   const { root, tasks } = await store();
   const { mkdir, writeFile } = await import("node:fs/promises");
   await mkdir(join(root, "metadata"), { recursive: true });
@@ -91,7 +91,7 @@ test("a corrupt task file degrades to disabled instead of throwing", async () =>
   assert.equal(state.enabled, false);
 });
 
-test("isDue respects the switch and the clock", async () => {
+it("isDue respects the switch and the clock", async () => {
   const { tasks } = await store();
   const off = defaultState();
   assert.equal(tasks.isDue(off, new Date()), false);

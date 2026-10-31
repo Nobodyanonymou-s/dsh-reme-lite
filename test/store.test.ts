@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { it } from "vitest";
 
-import { renderNode } from "../src/markdown.js";
-import { MemoryStore } from "../src/store.js";
+import { renderNode } from "../src/markdown.ts";
+import { MemoryStore } from "../src/store.ts";
 
-async function makeStore() {
+async function makeStore(): Promise<{ root: string; store: MemoryStore }> {
   const root = await mkdtemp(join(tmpdir(), "mem-store-"));
   const store = new MemoryStore({ root });
   await store.write({
@@ -27,7 +27,7 @@ async function makeStore() {
   return { root, store };
 }
 
-test("indexes only daily and digest", async () => {
+it("indexes only daily and digest", async () => {
   const { root, store } = await makeStore();
   const stats = store.stats();
   assert.equal(stats.files, 2);
@@ -42,9 +42,10 @@ test("indexes only daily and digest", async () => {
   assert.equal(store.search("秘密口令").length, 0);
 });
 
-test("retrieval returns path and real line numbers", async () => {
+it("retrieval returns path and real line numbers", async () => {
   const { store } = await makeStore();
   const [top] = store.search("部署窗口");
+  assert.ok(top);
   assert.equal(top.relPath, "daily/2026-10-25.md");
   assert.ok(top.startLine >= 1);
   assert.ok(top.endLine >= top.startLine);
@@ -54,29 +55,29 @@ test("retrieval returns path and real line numbers", async () => {
   assert.ok(slice.includes("部署窗口"), `line range must contain the text, got: ${slice}`);
 });
 
-test("wikilink neighbours are added at a discount", async () => {
+it("wikilink neighbours are added at a discount", async () => {
   const { store } = await makeStore();
   const hits = store.search("PostgreSQL");
-  assert.equal(hits[0].relPath, "digest/wiki/上线手册.md");
+  assert.equal(hits[0]!.relPath, "digest/wiki/上线手册.md");
   const linked = hits.find((hit) => hit.relPath === "daily/2026-10-25.md");
   assert.ok(linked, "link expansion should surface the cited daily page");
-  assert.ok(linked.score < hits[0].score, "expanded hits rank below direct hits");
+  assert.ok(linked.score < hits[0]!.score, "expanded hits rank below direct hits");
   assert.ok(linked.via?.includes("上线手册"));
 });
 
-test("link expansion can be disabled", async () => {
+it("link expansion can be disabled", async () => {
   const { store } = await makeStore();
   const hits = store.search("PostgreSQL", { expandLinks: false });
   assert.ok(hits.every((hit) => hit.relPath !== "daily/2026-10-25.md"));
 });
 
-test("paths cannot escape the workspace", async () => {
+it("paths cannot escape the workspace", async () => {
   const { store } = await makeStore();
   await assert.rejects(() => store.write({ relPath: "../evil.md", content: "x" }), /escapes/);
   await assert.rejects(() => store.write({ relPath: "notes.txt", content: "x" }), /must be \.md/);
 });
 
-test("rebuild picks up external edits", async () => {
+it("rebuild picks up external edits", async () => {
   const { root, store } = await makeStore();
   const { writeFile } = await import("node:fs/promises");
   await writeFile(
@@ -85,5 +86,6 @@ test("rebuild picks up external edits", async () => {
   );
   await store.rebuild();
   const [top] = store.search("季度预算");
+  assert.ok(top);
   assert.equal(top.relPath, "digest/wiki/新节点.md");
 });

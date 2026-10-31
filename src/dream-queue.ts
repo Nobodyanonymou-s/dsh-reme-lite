@@ -13,22 +13,33 @@ import { join } from "node:path";
 
 const REQUEST_ID = /^\d{4}-\d{2}-\d{2}T[\d-]+Z-[a-z0-9]{4}$/;
 
+export interface DreamRequest {
+  material: string;
+  reason?: string;
+  at?: Date;
+}
+
+export interface QueuedDream {
+  id: string;
+  createdAt: string;
+  reason: string;
+  material: string;
+}
+
 export class DreamQueue {
-  /** @param {{ root: string }} options */
-  constructor(options) {
+  root: string;
+  dir: string;
+
+  constructor(options: { root: string }) {
     this.root = options.root;
     this.dir = join(options.root, "metadata", "dream-queue");
   }
 
-  async ensure() {
+  async ensure(): Promise<void> {
     await mkdir(this.dir, { recursive: true });
   }
 
-  /**
-   * @param {{ material: string, reason?: string, at?: Date }} request
-   * @returns {Promise<{ id: string, path: string }>}
-   */
-  async push(request) {
+  async push(request: DreamRequest): Promise<{ id: string; path: string }> {
     await this.ensure();
     const at = request.at ?? new Date();
     const stamp = at.toISOString().replace(/[:.]/g, "-");
@@ -53,26 +64,26 @@ export class DreamQueue {
 
   /**
    * Oldest first: a backlog should be consolidated in the order it happened.
-   * @returns {Promise<{ id: string, createdAt: string, reason: string, material: string }[]>}
    */
-  async list() {
+  async list(): Promise<QueuedDream[]> {
     let names;
     try {
       names = await readdir(this.dir);
     } catch {
       return [];
     }
-    const requests = [];
+    const requests: QueuedDream[] = [];
     for (const name of names) {
       if (!name.endsWith(".json")) continue;
       try {
-        const parsed = JSON.parse(await readFile(join(this.dir, name), "utf8"));
-        if (REQUEST_ID.test(parsed.id ?? "") || name.endsWith(".json")) {
+        const parsed: unknown = JSON.parse(await readFile(join(this.dir, name), "utf8"));
+        const record = (parsed ?? {}) as Record<string, unknown>;
+        if (REQUEST_ID.test(String(record.id ?? "")) || name.endsWith(".json")) {
           requests.push({
-            id: String(parsed.id ?? name.replace(/\.json$/, "")),
-            createdAt: String(parsed.createdAt ?? ""),
-            reason: String(parsed.reason ?? "scheduled"),
-            material: String(parsed.material ?? ""),
+            id: String(record.id ?? name.replace(/\.json$/, "")),
+            createdAt: String(record.createdAt ?? ""),
+            reason: String(record.reason ?? "scheduled"),
+            material: String(record.material ?? ""),
           });
         }
       } catch {
@@ -82,13 +93,12 @@ export class DreamQueue {
     return requests.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
   }
 
-  async peek() {
+  async peek(): Promise<QueuedDream | null> {
     const [first] = await this.list();
     return first ?? null;
   }
 
-  /** @param {string} id */
-  async remove(id) {
+  async remove(id: string): Promise<boolean> {
     const safe = id.replace(/[^A-Za-z0-9._-]/g, "");
     if (!safe) return false;
     try {
@@ -99,13 +109,13 @@ export class DreamQueue {
     }
   }
 
-  async clear() {
+  async clear(): Promise<number> {
     const requests = await this.list();
     for (const request of requests) await this.remove(request.id);
     return requests.length;
   }
 
-  async size() {
+  async size(): Promise<number> {
     return (await this.list()).length;
   }
 }

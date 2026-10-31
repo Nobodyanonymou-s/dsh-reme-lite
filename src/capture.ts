@@ -14,56 +14,47 @@ import { join } from "node:path";
 export const AUTO_START = "<!-- notes:auto -->";
 export const AUTO_END = "<!-- /notes:auto -->";
 
-/**
- * @typedef {{ role: "user" | "assistant", text: string, at: string }} Turn
- */
+export interface Turn {
+  role: "user" | "assistant";
+  text: string;
+  at: string;
+}
 
-/** @param {string} value */
-export function shortHash(value) {
+export function shortHash(value: string): string {
   return createHash("sha1").update(value).digest("hex").slice(0, 12);
 }
 
-/**
- * @param {string} sessionId
- */
-export function dialogFileName(sessionId) {
+export function dialogFileName(sessionId: string): string {
   const safe = sessionId.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80);
   return `${safe || "session"}-${shortHash(sessionId)}.jsonl`;
 }
 
-/** @param {Date} date */
-export function dateKey(date) {
+export function dateKey(date: Date): string {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
   const d = String(date.getDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
 }
 
-/**
- * @param {string} text
- * @param {number} [max]
- */
-export function excerpt(text, max = 140) {
+export function excerpt(text: string, max = 140): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
 }
 
 export class Capture {
-  /**
-   * @param {{ root: string, interval?: number, timeZone?: string }} options
-   */
-  constructor(options) {
+  root: string;
+  interval: number;
+  buffers: Map<string, Turn[]> = new Map();
+  lastHash: Map<string, string> = new Map();
+  droppedDuplicates = 0;
+  capturedTurns = 0;
+
+  constructor(options: { root: string; interval?: number; timeZone?: string }) {
     this.root = options.root;
     this.interval = Math.max(1, options.interval ?? 5);
-    /** @type {Map<string, Turn[]>} */
-    this.buffers = new Map();
-    /** @type {Map<string, string>} */
-    this.lastHash = new Map();
-    this.droppedDuplicates = 0;
-    this.capturedTurns = 0;
   }
 
-  get pending() {
+  get pending(): number {
     let total = 0;
     for (const turns of this.buffers.values()) total += turns.length;
     return total;
@@ -71,10 +62,8 @@ export class Capture {
 
   /**
    * Record one completed turn. Returns true when a durable write happened.
-   * @param {string} sessionId
-   * @param {Turn} turn
    */
-  async record(sessionId, turn) {
+  async record(sessionId: string, turn: Turn): Promise<boolean> {
     const text = turn.text.trim();
     if (!text) return false;
     // Skip a turn identical to the previous one in the same session: retries
@@ -104,22 +93,19 @@ export class Capture {
 
   /**
    * Fold the buffer into today's daily page.
-   * @param {string} sessionId
    */
-  async flush(sessionId) {
+  async flush(sessionId: string): Promise<string[] | null> {
     const turns = this.buffers.get(sessionId);
     if (!turns || turns.length === 0) return null;
     this.buffers.set(sessionId, []);
 
-    /** @type {Map<string, Turn[]>} */
-    const byDate = new Map();
+    const byDate = new Map<string, Turn[]>();
     for (const turn of turns) {
       const key = dateKey(new Date(turn.at));
       byDate.set(key, [...(byDate.get(key) ?? []), turn]);
     }
 
-    /** @type {string[]} */
-    const written = [];
+    const written: string[] = [];
     for (const [key, dayTurns] of byDate) {
       const relPath = `daily/${key}.md`;
       const absolute = join(this.root, "daily", `${key}.md`);
@@ -137,9 +123,8 @@ export class Capture {
   }
 
   /** Drain every session buffer. */
-  async flushAll() {
-    /** @type {string[]} */
-    const written = [];
+  async flushAll(): Promise<string[]> {
+    const written: string[] = [];
     for (const sessionId of [...this.buffers.keys()]) {
       const result = await this.flush(sessionId);
       if (result) written.push(...result);
@@ -147,7 +132,7 @@ export class Capture {
     return written;
   }
 
-  stats() {
+  stats(): { sessions: number; pending: number; capturedTurns: number; droppedDuplicates: number } {
     return {
       sessions: this.buffers.size,
       pending: this.pending,
@@ -157,11 +142,7 @@ export class Capture {
   }
 }
 
-/**
- * @param {Turn[]} turns
- * @param {string} sessionId
- */
-function buildAutoBlock(turns, sessionId) {
+function buildAutoBlock(turns: Turn[], sessionId: string): string {
   const lines = turns.map((turn) => {
     const time = new Date(turn.at).toISOString().slice(11, 16);
     const who = turn.role === "user" ? "user" : "assistant";
@@ -180,10 +161,8 @@ function buildAutoBlock(turns, sessionId) {
  * session the later flush silently erased the earlier notes. Merge instead —
  * keep chronological order, drop exact repeats, and list every contributing
  * session in the trailer.
- * @param {string} existing
- * @param {string} block
  */
-export function upsertAutoBlock(existing, block) {
+export function upsertAutoBlock(existing: string, block: string): string {
   const start = existing.indexOf(AUTO_START);
   const end = existing.indexOf(AUTO_END);
   if (start === -1 || end === -1 || end < start) {
@@ -201,20 +180,16 @@ export function upsertAutoBlock(existing, block) {
   return `${before}\n${merged}\n${after}`;
 }
 
-/** @param {string} line */
-function turnTime(line) {
+function turnTime(line: string): string | null {
   const match = /^- (\d{2}:\d{2}) /.exec(line);
-  return match ? match[1] : null;
+  return match?.[1] ?? null;
 }
 
 /**
  * Merge turn lines: keep chronological order and drop exact repeats (a crash
  * between the journal write and the page write replays the same turn).
- * @param {string[]} existing
- * @param {string[]} incoming
- * @returns {string[]}
  */
-export function mergeTurnLines(existing, incoming) {
+export function mergeTurnLines(existing: string[], incoming: string[]): string[] {
   const merged = [...existing];
   for (const line of incoming) {
     if (merged.includes(line)) continue;
@@ -236,18 +211,16 @@ export function mergeTurnLines(existing, incoming) {
  * Split one auto block into its turn lines and contributing sessions.
  * Older pages carry a single `_session: <id>_` trailer; merged pages carry a
  * comma-separated list under the same label.
- * @param {string} text
- * @returns {{ turns: string[], sessions: string[] }}
  */
-function parseBlock(text) {
+function parseBlock(text: string): { turns: string[]; sessions: string[] } {
   const body = text.replace(AUTO_START, "").replace(AUTO_END, "");
-  const turns = [];
-  const sessions = [];
+  const turns: string[] = [];
+  const sessions: string[] = [];
   for (const raw of body.split("\n")) {
     const line = raw.trimEnd();
     if (!line) continue;
     const trailer = /^_session:\s*(.*)_$/.exec(line);
-    if (trailer) {
+    if (trailer?.[1]) {
       for (const part of trailer[1].split(",")) {
         const id = part.trim();
         if (id) sessions.push(id);
@@ -259,11 +232,7 @@ function parseBlock(text) {
   return { turns, sessions };
 }
 
-/**
- * @param {string[]} turns
- * @param {string[]} sessions
- */
-function formatBlock(turns, sessions) {
+function formatBlock(turns: string[], sessions: string[]): string {
   const unique = [...new Set(sessions.filter(Boolean))];
   if (unique.length === 0) return turns.join("\n");
   return [...turns, "", `_session: ${unique.join(", ")}_`].join("\n");

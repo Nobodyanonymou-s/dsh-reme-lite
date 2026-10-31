@@ -25,3 +25,18 @@
 
 `dsh plugin --profile desktop add ./dist/dsh-reme-lite-0.1.5.tgz`（或原安装来源）后重启，
 插件管理页确认已加载；浏览器半边应出现「记忆」热图页签。
+
+## 0.2.0（TS 迁移）
+
+以上结论是 0.1.5 快照；0.2.0 起源码迁到 TypeScript，装机形态变了：
+
+- **产物布局**：源码在 `src/`，tsdown 编译到 `lib/`——`lib/index.js`（插件入口）、`lib/client.js`（浏览器 classic script）、`lib/store.js`、`lib/memctl.js`（CLI）；`package.json` 的 `main`/`exports`/`bin` 全部指向 `lib/`，`client/`、`bin/` 目录删除。
+- **engines.dsh 收紧**：`>=0.2.0-rc.2` → `^0.2.1-alpha.2`（与官方 dsh-superagent 同款范围）。注意：该 semver 范围**不含** `0.2.2-alpha.2`——prerelease 只在同版本号内可比，`^0.2.1-alpha.2` 覆盖 `0.2.1-rc.*` 与 `0.2.1` 正式版，`0.2.2-alpha` 宿主会被拒装，直到范围放宽。上表里「0.2.2-alpha.2 兼容」是 0.1.5 的结论，对 0.2.0 以 engines 判定为准。
+- **构建时机**：tarball 里是编译产物；GitHub 直装则靠 `prepare` 在装机时构建（peer 依赖只做 typecheck，产物仍零运行时 `@deepseek-ai/*` 导入）。
+
+重装两条路：
+
+1. **GitHub + allowBuilds**：`dsh plugin --profile desktop add github:Nobodyanonymou-s/dsh-reme-lite`。pnpm ≥ 10 默认拦 git 依赖的构建脚本，首次 add 会失败并给出提示；往该 profile 的 `pnpm-workspace.yaml` 加 `allowBuilds: { dsh-reme-lite: true }` 后重跑一次。`allowBuilds` 等于授权装机时运行本包代码，建议钉 commit（`…#<sha>`）。
+2. **tarball（不需要 allowBuilds）**：clone 后 `npm pack --pack-destination ./dist`，`dsh plugin --profile desktop add ./dist/dsh-reme-lite-0.2.0.tgz`。
+
+已装的 0.1.x tarball 不受影响，继续可用，直到主动升级到 0.2.0。

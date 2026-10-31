@@ -16,35 +16,64 @@
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join, posix, relative, resolve, sep } from "node:path";
 
-import { BM25 } from "./bm25.js";
-import { chunkMarkdown, extractWikilinks, linkKey } from "./markdown.js";
+import { BM25 } from "./bm25.ts";
+import { chunkMarkdown, extractWikilinks, linkKey } from "./markdown.ts";
+import type { Chunk } from "./markdown.ts";
 
-/** @typedef {{ relPath: string, startLine: number, endLine: number, heading: string, text: string, score: number, via?: string }} SearchHit */
+export interface SearchHit {
+  relPath: string;
+  startLine: number;
+  endLine: number;
+  heading: string;
+  text: string;
+  score: number;
+  via?: string;
+}
 
 export const INDEXED_DIRS = ["daily", "digest"];
 
+interface IndexedFile {
+  relPath: string;
+  mtimeMs: number;
+  chunks: Chunk[];
+}
+
+interface IndexedChunk {
+  id: number;
+  relPath: string;
+  chunk: Chunk;
+}
+
+export interface ChunkMeta {
+  relPath: string;
+  chunk: Chunk;
+}
+
+export interface SearchOptions {
+  limit?: number;
+  minScore?: number;
+  expandLinks?: boolean;
+}
+
 export class MemoryStore {
-  /**
-   * @param {{ root: string, maxChars?: number }} options
-   */
-  constructor(options) {
+  root: string;
+  maxChars: number;
+  files: IndexedFile[] = [];
+  chunks: IndexedChunk[] = [];
+  byKey: Map<string, string> = new Map();
+  index = new BM25();
+  builtAt = 0;
+
+  constructor(options: { root: string; maxChars?: number }) {
     this.root = resolve(options.root);
     this.maxChars = options.maxChars ?? 900;
-    /** @type {{ relPath: string, mtimeMs: number, chunks: import("./markdown.js").Chunk[] }[]} */
-    this.files = [];
-    /** @type {import("./bm25.js").Document[]} */
-    this.chunks = [];
-    /** @type {Map<string, string>} */
-    this.byKey = new Map();
-    this.index = new BM25();
-    this.builtAt = 0;
   }
 
-  get indexPath() {
+  get indexPath(): string {
     return join(this.root, "metadata", "index.json");
   }
 
-  async ensureLayout() {
+  async ensureLayout(): Promise<void> {
     await mkdir(join(this.root, "daily"), { recursive: true });
     await mkdir(join(this.root, "digest"), { recursive: true });
     await mkdir(join(this.root, "session", "dialog"), { recursive: true });
@@ -54,10 +83,8 @@ export class MemoryStore {
   /**
    * Resolve a user-supplied relative path inside the workspace, refusing
    * escapes.
-   * @param {string} relPath
-   * @returns {string}
    */
-  resolveInside(relPath) {
+  resolveInside(relPath: string): string {
     const cleaned = relPath.replace(/\\/g, "/").replace(/^\/+/, "");
     const absolute = resolve(this.root, cleaned);
     const rel = relative(this.root, absolute);
@@ -70,12 +97,10 @@ export class MemoryStore {
   /**
    * Rebuild the in-memory index from Markdown on disk. Unchanged files are
    * re-chunked only when their mtime moved.
-   * @returns {Promise<{ files: number, chunks: number }>}
    */
-  async rebuild() {
+  async rebuild(): Promise<{ files: number; chunks: number }> {
     await this.ensureLayout();
-    /** @type {typeof this.files} */
-    const next = [];
+    const next: IndexedFile[] = [];
     for (const dir of INDEXED_DIRS) {
       const found = await this.#walk(join(this.root, dir));
       for (const absolute of found) {
@@ -104,7 +129,7 @@ export class MemoryStore {
       for (const chunk of file.chunks) {
         const id = this.index.add({
           text: `${chunk.heading}\n${chunk.text}`,
-          meta: { relPath: file.relPath, chunk },
+          meta: { relPath: file.relPath, chunk } satisfies ChunkMeta,
         });
         this.chunks.push({ id, relPath: file.relPath, chunk });
       }
@@ -114,13 +139,8 @@ export class MemoryStore {
     return { files: this.files.length, chunks: this.chunks.length };
   }
 
-  /**
-   * @param {string} dir
-   * @returns {Promise<string[]>}
-   */
-  async #walk(dir) {
-    /** @type {string[]} */
-    const out = [];
+  async #walk(dir: string): Promise<string[]> {
+    const out: string[] = [];
     let entries;
     try {
       entries = await readdir(dir, { withFileTypes: true });
@@ -138,7 +158,7 @@ export class MemoryStore {
     return out;
   }
 
-  async #writeManifest() {
+  async #writeManifest(): Promise<void> {
     const manifest = {
       builtAt: this.builtAt,
       files: this.files.map((f) => ({ path: f.relPath, chunks: f.chunks.length })),
@@ -150,21 +170,13 @@ export class MemoryStore {
     }
   }
 
-  /**
-   * @param {string} query
-   * @param {{ limit?: number, minScore?: number, expandLinks?: boolean }} [options]
-   * @returns {SearchHit[]}
-   */
-  search(query, options = {}) {
+  search(query: string, options: SearchOptions = {}): SearchHit[] {
     const limit = Math.min(Math.max(options.limit ?? 5, 1), 50);
     const minScore = Math.max(0, options.minScore ?? 0);
     const expandLinks = options.expandLinks ?? true;
     const hits = this.index.search(query, { limit: Math.max(limit * 3, 12), minScore });
-    /** @type {SearchHit[]} */
-    const results = hits.map((hit) => {
-      const meta = /** @type {{ relPath: string, chunk: import("./markdown.js").Chunk }} */ (
-        hit.doc.meta
-      );
+    const results: SearchHit[] = hits.map((hit) => {
+      const meta = hit.doc.meta as unknown as ChunkMeta;
       return {
         relPath: meta.relPath,
         startLine: meta.chunk.startLine,
@@ -177,8 +189,7 @@ export class MemoryStore {
 
     if (expandLinks) results.push(...this.#expandLinks(results));
 
-    /** @type {Map<string, SearchHit>} */
-    const deduped = new Map();
+    const deduped = new Map<string, SearchHit>();
     for (const hit of results) {
       const key = `${hit.relPath}:${hit.startLine}`;
       const existing = deduped.get(key);
@@ -194,12 +205,9 @@ export class MemoryStore {
    * One-hop wikilink neighbours of the direct hits, at a discount. This is
    * ReMe's "bounded link expansion": it lets a query reach a note you never
    * mentioned, without dragging in the whole graph.
-   * @param {SearchHit[]} hits
-   * @returns {SearchHit[]}
    */
-  #expandLinks(hits) {
-    /** @type {SearchHit[]} */
-    const extra = [];
+  #expandLinks(hits: SearchHit[]): SearchHit[] {
+    const extra: SearchHit[] = [];
     const seen = new Set(hits.map((hit) => hit.relPath));
     for (const hit of hits.slice(0, 3)) {
       for (const target of extractWikilinks(hit.text)) {
@@ -226,10 +234,8 @@ export class MemoryStore {
 
   /**
    * Write a memory node and reindex.
-   * @param {{ relPath: string, content: string }} input
-   * @returns {Promise<{ relPath: string, bytes: number }>}
    */
-  async write(input) {
+  async write(input: { relPath: string; content: string }): Promise<{ relPath: string; bytes: number }> {
     const relPath = input.relPath.replace(/\\/g, "/").replace(/^\/+/, "");
     if (!/\.(md|markdown)$/i.test(relPath)) {
       throw new Error(`memory nodes must be .md: ${relPath}`);
@@ -241,33 +247,27 @@ export class MemoryStore {
     return { relPath, bytes: Buffer.byteLength(input.content, "utf8") };
   }
 
-  /**
-   * @param {string} relPath
-   * @returns {Promise<string>}
-   */
-  async read(relPath) {
+  async read(relPath: string): Promise<string> {
     return readFile(this.resolveInside(relPath), "utf8");
   }
 
-  /** @param {number} [limit] */
-  async recentDaily(limit = 7) {
+  async recentDaily(limit = 7): Promise<string[]> {
     const files = this.files
       .filter((file) => file.relPath.startsWith("daily/"))
       .sort((a, b) => (a.relPath < b.relPath ? 1 : -1));
     return files.slice(0, limit).map((file) => file.relPath);
   }
 
-  digestTitles() {
+  digestTitles(): string[] {
     return this.files
       .filter((file) => file.relPath.startsWith("digest/"))
       .map((file) => file.relPath);
   }
 
-  stats() {
-    /** @type {Record<string, number>} */
-    const byDir = {};
+  stats(): { root: string; files: number; chunks: number; byDir: Record<string, number>; builtAt: string } {
+    const byDir: Record<string, number> = {};
     for (const file of this.files) {
-      const dir = file.relPath.split("/")[0];
+      const dir = file.relPath.split("/")[0] ?? "";
       byDir[dir] = (byDir[dir] ?? 0) + file.chunks.length;
     }
     return {

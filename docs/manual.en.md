@@ -66,12 +66,13 @@ Two layers, one owner each:
 
 ## How it is built
 
-Four decisions worth knowing before you read the code:
+Five decisions worth knowing before you read the code:
 
-- **No `@deepseek-ai/*` imports in the Host half.** A plugin mounted from a path has no resolution root for the Host's packages, and the failure happens during `import` — before any of your code runs. The two helpers that would have been imported (`defineTool`, `createUserMessage`) are inlined against the shipped implementations. The mount row references the package by name: renaming means changing `package.json#name` and that row in `cordis.patch.yml` together.
-- **The client half is a classic script, not an ES module.** DSH loads client bundles through `<script src>` and the only entry is `window.__ModuleLoader__.load({ id, factory })`; `require()` resolves shell seed words such as `react`. So the page is hand-written `React.createElement` — no JSX, no bundler.
+- **A TypeScript build layer (since 0.2.0).** `src/` is compiled by tsdown into two targets: Node ESM entries under `lib/` (`lib/index.js` plugin, `lib/store.js`, `lib/memctl.js` CLI) and one browser classic script `lib/client.js`. `main` / `exports` / `bin` in `package.json` all point at `lib/`; the `client/` and `bin/` directories are gone.
+- **No runtime `@deepseek-ai/*` imports in the compiled Host half.** Every host-side import in the source is `import type` (erased at compile time), and a test asserts the built `lib/index.js` carries no static host import. The two helpers that would have been imported (`defineTool`, `createUserMessage`) are inlined against the shipped implementations. The mount row references the package by name: renaming means changing `package.json#name` and that row in `cordis.patch.yml` together.
+- **The client half is compiled to a classic script.** DSH loads client bundles through `<script src>` and the only entry is `window.__ModuleLoader__.load({ id, factory })`; `require()` resolves shell seed words such as `react`. The source is a regular TS module that tsdown wraps in that contract; the page itself stays hand-written `React.createElement` — no JSX.
 - **The browser cannot read the workspace.** The Host answers two same-origin routes, `/node-memory/status.json` (aggregates only — counts, never memory text) and `POST /node-memory/settings` (validated, atomic, with an Origin check).
-- **Failures are loud in files, not in the void.** A diagnostic beacon writes to `~/.dsh/node-memory-boot.log`, because a GUI launch gives no stdout and a silent non-load is indistinguishable from a plugin that does nothing.
+- **Failures can be made loud in files (opt-in).** A diagnostic beacon writes to `~/.dsh/node-memory-boot.log`, because a GUI launch gives no stdout and a silent non-load is indistinguishable from a plugin that does nothing. Off by default; set `DSH_NODE_MEMORY_BEACON=1` when diagnosing a mount.
 
 ## Known limits
 
@@ -79,4 +80,4 @@ Four decisions worth knowing before you read the code:
 - Scheduled consolidation depends on a session receiving the reminder: the reminder is bound to one session, and the plugin moves it when a new session opens; if no session is running at the scheduled time, the Host delivers it when one resumes. What counts as "ran" is the reminder in the session history — `memory_dream` back-fills the run record when it is called, so "a task exists" and "it has run" are two different facts in the status.
 - No resource ingestion (PDFs, images), no Studio, no MCP server. ReMe has all three.
 - One workspace; no multi-agent sharing or isolation yet.
-- Not published to npm. Tarball install only, for now.
+- Not published to npm. Two install channels: GitHub + `prepare` (needs the pnpm `allowBuilds` allowance) or a locally `npm pack`-ed prebuilt tarball.

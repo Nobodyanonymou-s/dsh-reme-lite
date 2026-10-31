@@ -2,15 +2,15 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { it } from "vitest";
 
-import { applySettings, loadSettings, saveSettings, settingsPath, validateSettings } from "../src/settings.js";
+import { applySettings, loadSettings, saveSettings, settingsPath, validateSettings } from "../src/settings.ts";
 
-async function workspace() {
+async function workspace(): Promise<string> {
   return mkdtemp(join(tmpdir(), "mem-settings-"));
 }
 
-test("only known, well-formed fields survive validation", () => {
+it("only known, well-formed fields survive validation", () => {
   const { settings, rejected } = validateSettings({
     language: "en",
     dreamEnabled: true,
@@ -28,7 +28,7 @@ test("only known, well-formed fields survive validation", () => {
   assert.deepEqual(rejected.sort(), ["dreamEnabledTypo", "workspace"], "unknown keys are reported, not stored");
 });
 
-test("malformed values are rejected individually", () => {
+it("malformed values are rejected individually", () => {
   const { settings, rejected } = validateSettings({
     language: "fr",
     dreamEnabled: "yes",
@@ -38,12 +38,12 @@ test("malformed values are rejected individually", () => {
   assert.deepEqual(rejected.sort(), ["dreamCron", "dreamEnabled", "language"]);
 });
 
-test("a missing or corrupt file reads as empty settings", async () => {
+it("a missing or corrupt file reads as empty settings", async () => {
   const root = await workspace();
   assert.deepEqual(await loadSettings(root), {});
 });
 
-test("save merges over what is already stored and is atomic", async () => {
+it("save merges over what is already stored and is atomic", async () => {
   const root = await workspace();
   await saveSettings(root, { language: "en" });
   const { settings } = await saveSettings(root, { dreamEnabled: true });
@@ -54,7 +54,7 @@ test("save merges over what is already stored and is atomic", async () => {
   assert.ok(!(await readFile(`${settingsPath(root)}.tmp`, "utf8").catch(() => null)), "no temp file left behind");
 });
 
-test("settings override the mount config key by key", () => {
+it("settings override the mount config key by key", () => {
   const base = {
     language: "zh",
     dreamEnabled: false,
@@ -70,7 +70,7 @@ test("settings override the mount config key by key", () => {
   assert.equal(base.language, "zh", "the input is not mutated");
 });
 
-test("auto is a valid stored value, not a resolved language", () => {
+it("auto is a valid stored value, not a resolved language", () => {
   const { settings } = validateSettings({ language: "auto" });
   assert.equal(settings.language, "auto");
   // applySettings keeps the resolved value when the stored one is auto.

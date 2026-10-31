@@ -15,12 +15,12 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { Capture } from "../src/capture.js";
-import { buildDreamMaterial } from "../src/dream.js";
-import { DreamTaskStore } from "../src/dream-task.js";
-import { renderNode } from "../src/markdown.js";
-import { describeNextRun } from "../src/schedule.js";
-import { MemoryStore } from "../src/store.js";
+import { Capture } from "./capture.ts";
+import { buildDreamMaterial } from "./dream.ts";
+import { DreamTaskStore } from "./dream-task.ts";
+import { renderNode } from "./markdown.ts";
+import { describeNextRun } from "./schedule.ts";
+import { MemoryStore } from "./store.ts";
 
 const root = process.env.DSH_MEMORY_ROOT || join(homedir(), ".dsh", "memory");
 const [, , command, ...args] = process.argv;
@@ -31,7 +31,7 @@ const tasks = new DreamTaskStore({ root });
 /**
  * @param {string} text
  */
-function fail(text) {
+function fail(text: string): void {
   console.error(text);
   process.exitCode = 1;
 }

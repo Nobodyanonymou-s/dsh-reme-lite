@@ -66,12 +66,13 @@
 
 ## 实现要点
 
-四个读代码前值得知道的决定：
+五个读代码前值得知道的决定：
 
-- **宿主侧不 import 任何 `@deepseek-ai/*`。** 从文件路径挂载的插件没有宿主包的解析根，失败发生在 `import` 阶段——在你自己的代码执行之前。两个原本要 import 的 helper（`defineTool`、`createUserMessage`）按宿主实现内联了。挂载行按包名引用：要改名就同时改 `package.json#name` 和 `cordis.patch.yml` 里那一行。
-- **客户端是 classic script，不是 ES module。** DSH 用 `<script src>` 加载客户端包，唯一入口是 `window.__ModuleLoader__.load({ id, factory })`，`require()` 只解析壳层预置的 `react` 等。所以页面是手写 `React.createElement`，没有 JSX、没有打包器。
+- **TS 构建层。** 源码在 `src/`，由 tsdown 编译出双目标：node ESM 打到 `lib/`（`lib/index.js` 插件入口、`lib/store.js`、`lib/memctl.js` CLI），浏览器 classic script 打到 `lib/client.js`。`package.json` 的 `main`/`exports`/`bin` 都指向 `lib/`，`client/`、`bin/` 目录已不存在。
+- **宿主侧编译后零运行时 `@deepseek-ai/*` 导入。** 从文件路径挂载的插件没有宿主包的解析根，运行时导入会失败在你自己的代码执行之前。源码里的 `@deepseek-ai/*` 都是 `import type`，编译期擦除；两个原本要 import 的 helper（`defineTool`、`createUserMessage`）按宿主实现内联了。「产物零运行时导入」由测试断言保证。挂载行按包名引用：要改名就同时改 `package.json#name` 和 `cordis.patch.yml` 里那一行。
+- **客户端是 classic script，不是 ES module。** DSH 用 `<script src>` 加载客户端包，唯一入口是 `window.__ModuleLoader__.load({ id, factory })`，`require()` 只解析壳层预置的 `react` 等。客户端由 tsdown 编译为 classic script（ModuleLoader banner 包裹），源码是常规 TS 模块；页面仍是手写 `React.createElement`，没有 JSX。
 - **浏览器读不到工作区。** 宿主提供两条同源路由：`/node-memory/status.json`（只有聚合计数，不发送记忆正文）与 `POST /node-memory/settings`（校验、原子写、检查 Origin）。
-- **失败要可见。** 诊断 beacon 写到 `~/.dsh/node-memory-boot.log`——GUI 启动没有 stdout，"静默未加载"和"什么都没做"看起来完全一样。
+- **失败要可见（按需开启）。** 诊断 beacon 写 `~/.dsh/node-memory-boot.log`——GUI 启动没有 stdout，"静默未加载"和"什么都没做"看起来完全一样。默认关闭，排查挂载问题时设 `DSH_NODE_MEMORY_BEACON=1` 再启动。
 
 ## 已知限制
 
@@ -79,4 +80,4 @@
 - 定时整理依赖会话接收提醒：提醒绑定在单个会话上，打开新会话时插件会把它搬过去；到点没有运行中的会话时，宿主在会话恢复后投递。整理执行依据是会话历史里的那条提醒——`memory_dream` 被调用时补记运行结果，所以「有任务」和「跑过」在状态里是两行不同的事实。
 - 没有资料摄入（PDF、图片）、没有 Studio、没有 MCP server。ReMe 三者都有。
 - 单工作区，暂不支持多 agent 共享或隔离。
-- 未发布到 npm，只支持 tarball 安装。
+- 未发布到 npm。两条安装通道：GitHub 源码 + 装机时构建（`prepare`，需在 profile 的 `pnpm-workspace.yaml` 里 `allowBuilds` 放行），或本地 `npm pack` 出的预编译 tarball。
