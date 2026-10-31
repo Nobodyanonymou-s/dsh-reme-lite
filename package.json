@@ -1,6 +1,6 @@
 {
   "name": "dsh-reme-lite",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "description": "ReMe-shaped long-term memory for DSH: Markdown workspace, BM25 recall, turn capture, scheduled consolidation",
   "author": {

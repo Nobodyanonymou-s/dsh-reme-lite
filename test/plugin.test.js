@@ -625,3 +625,52 @@ test("the consumed note follows the pinned language", async () => {
   const material = await tools.find((item) => item.name === "memory_dream").execute({}, {});
   assert.match(material, /\(1 pending consolidation request\(s\) consumed\.\)/);
 });
+
+test("a host delivery record credits the scheduled run without session history", async () => {
+  const root = await workspace();
+  await mkdir(join(root, "metadata"), { recursive: true });
+  await writeFile(
+    join(root, "metadata", "dream-task.json"),
+    JSON.stringify({
+      id: "dream",
+      enabled: true,
+      cron: "0 23 * * *",
+      timeZone: "Asia/Shanghai",
+      createdAt: "2026-10-20T00:00:00.000Z",
+      updatedAt: "2026-10-20T00:00:00.000Z",
+      runs: [],
+      lastRunAt: null,
+      nextRunAt: "2026-10-30T15:00:00.000Z",
+    }),
+    "utf8",
+  );
+
+  const schedule = fakeSchedule([
+    {
+      id: "schedule-1",
+      sessionId: "session-9",
+      title: "记忆整理",
+      prompt: "[[node-memory:dream]]",
+      lastDelivery: {
+        scheduledAt: "2026-10-29T15:00:00.000Z",
+        deliveredAt: "2026-10-29T15:00:00.052Z",
+        messageId: "m",
+      },
+    },
+  ]);
+  const { ctx, tools } = makeCtx(schedule);
+  apply(ctx, { workspace: root, dreamEnabled: true, dreamCron: "0 23 * * *", dreamTimeZone: "Asia/Shanghai" });
+  await settle();
+
+  // A session snapshot inside a tool call does not necessarily carry the event
+  // history, so the Host's delivery record is what proves the run happened.
+  const agent = { session: { id: "session-9", header: { id: "session-9" }, events: [] }, inbox: { nextStep: [] }, inject() {} };
+  await tools.find((item) => item.name === "memory_dream").execute({}, { agent });
+
+  const state = JSON.parse(await readFile(join(root, "metadata", "dream-task.json"), "utf8"));
+  assert.equal(state.runs.length, 1);
+  assert.match(state.runs[0].detail, /2026-10-29T15:00:00\.000Z/);
+  assert.equal(state.lastStatus, "ok");
+  assert.equal(state.nextRunAt, "2026-10-30T15:00:00.000Z", "the next run follows the delivered occurrence");
+});
+

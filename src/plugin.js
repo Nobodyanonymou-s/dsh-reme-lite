@@ -734,6 +734,30 @@ function scheduledDreamAt(session) {
 }
 
 /**
+ * Scheduled occurrence this dream call is executing, if any. The Host owns the
+ * delivery, so its record about the reminder bound to this session is
+ * authoritative; the session-event scan is only a fallback for hosts without a
+ * schedule service.
+ * @param {any} ctx
+ * @param {any} exec
+ * @returns {Promise<string | null>}
+ */
+async function scheduledOccurrence(ctx, exec) {
+  const sessionId = exec?.agent?.session?.id ?? null;
+  const rows = await hostRows(ctx);
+  if (rows !== null && sessionId) {
+    const delivered = rows
+      .filter((row) => isOurRow(row) && row.sessionId === sessionId)
+      .map((row) => row.lastDelivery?.scheduledAt)
+      .filter((value) => typeof value === "string")
+      .sort()
+      .at(-1);
+    if (delivered) return delivered;
+  }
+  return scheduledDreamAt(exec?.agent?.session);
+}
+
+/**
  * One-line description of a Host reminder row. "The task exists" and "the task
  * ran" are different facts: say where it lands and when it last fired.
  * @param {any} row
@@ -921,9 +945,10 @@ function registerTools(ctx, runtime) {
       // caller now holds it. Leaving the queue untouched would nag forever.
       const consumed = await queue.clear();
       // The Host reminder path never reported back, so the task record said
-      // "never ran" while dreams ran nightly. The occurrence is in this
-      // session's history; record it when the material is actually handed out.
-      const occurrence = scheduledDreamAt(exec?.agent?.session);
+      // "never ran" while dreams ran nightly. The Host's delivery record is the
+      // reliable source; a session snapshot inside a tool call does not
+      // necessarily carry the event history.
+      const occurrence = await scheduledOccurrence(ctx, exec);
       if (occurrence) {
         const state = await tasks.load();
         const previous = state.lastRunAt ? Date.parse(state.lastRunAt) : 0;
