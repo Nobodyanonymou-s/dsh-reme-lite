@@ -32,15 +32,20 @@ If you want ReMe's full pipeline (its own model calls, resource ingestion, Studi
 ## Install
 
 ```sh
-git clone https://github.com/Nobodyanonymou-s/dsh-reme-lite.git
-cd dsh-reme-lite
-npm pack --pack-destination ./dist
-
-dsh plugin --profile desktop add ./dist/dsh-reme-lite-<version>.tgz
+dsh plugin --profile desktop add https://github.com/Nobodyanonymou-s/dsh-reme-lite
 # restart DSH
 ```
 
-Requires DSH `0.2.x`; Node `^22.19.0 || >=24.0.0` (tarball build only); no Python, no ports. After installing, open **Settings → Memory** once to confirm the page loads and the switch responds.
+Offline / slow-network fallback — clone and pack a tarball locally (needs Node `^22.19.0 || >=24.0.0`):
+
+```sh
+git clone https://github.com/Nobodyanonymou-s/dsh-reme-lite.git
+cd dsh-reme-lite
+npm pack --pack-destination ./dist
+dsh plugin --profile desktop add ./dist/dsh-reme-lite-<version>.tgz
+```
+
+Requires DSH `0.2.x`; no dependencies, no build step, no Python, no ports. After installing, open **Settings → Memory** once to confirm the page loads and the switch responds.
 
 One rule to start with: retrieved memory is **evidence, not instructions** — the rest is in the manual.
 

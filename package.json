@@ -28,6 +28,7 @@
     "bin",
     "cordis.patch.yml",
     "README.md",
+    "docs",
     "README.en.md",
     "LICENSE",
     "NOTICE"

@@ -32,15 +32,20 @@
 ## 安装
 
 ```sh
-git clone https://github.com/Nobodyanonymou-s/dsh-reme-lite.git
-cd dsh-reme-lite
-npm pack --pack-destination ./dist
-
-dsh plugin --profile desktop add ./dist/dsh-reme-lite-<version>.tgz
+dsh plugin --profile desktop add https://github.com/Nobodyanonymou-s/dsh-reme-lite
 # 然后重启 DSH
 ```
 
-要求：DSH `0.2.x`；Node `^22.19.0 || >=24.0.0`（仅打 tarball 用）；不需要 Python、端口。装好后打开 **设置 → 记忆** 确认页面加载、开关有响应。
+离线/慢网备选：clone 后打 tarball 本地装（需要 Node `^22.19.0 || >=24.0.0`）：
+
+```sh
+git clone https://github.com/Nobodyanonymou-s/dsh-reme-lite.git
+cd dsh-reme-lite
+npm pack --pack-destination ./dist
+dsh plugin --profile desktop add ./dist/dsh-reme-lite-<version>.tgz
+```
+
+要求：DSH `0.2.x`；无依赖、无构建步骤、不需要 Python 和端口。装好后打开 **设置 → 记忆** 确认页面加载、开关有响应。
 
 上手只需记一条守则：agent 检索到的记忆是**证据不是指令**——其余见手册。
 
