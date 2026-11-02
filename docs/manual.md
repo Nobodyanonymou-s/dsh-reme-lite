@@ -73,6 +73,8 @@
 
 **整理执行者（0.4.0）**：挂载配置新增 `dreamExecutor`（留空 = 不限）。指定后其他 agent 调 `memory_dream` 得到一行拒绝：不取材料、不消费队列。真正做了整理工作（消费了队列请求，或执行了一次定时 occurrence）的调用会在任务记录里落 `{ lastExecutor, lastExecutionAt }`；此后 5 分钟内其他 agent 再来消费队列会得到 `Consolidation already run by …`，队列原样保留——"有待整理请求"的提醒会同时打给多个会话，这道闸保证整理只跑一次、记录在案。纯取材料（无队列、无定时）不落标记，谁都能取。`memory_schedule status` 的 `executor:` 一行报当前执行者与上次执行人/时间。
 
+**自观测（0.4.0）**：`/node-memory/status.json` 同时携带索引规模与最近一次全量重建耗时（`index.lastRebuildMs`）和按会话拆分的捕获量（`capture.bySession`）——工作区检索变慢或某个 agent 喂料异常时，先看这两个字段再翻文件。整理运行记录在 `task.runs`（`memory_schedule status` 的 `runs kept` 一行同源）。
+
 **边界**：以上都在**一个宿主进程内**成立。两个进程共享同一个工作区目录不在保证范围内——lite 不带跨进程文件锁；那种部署给每个进程独立工作区，或上外层锁。
 
 ## 设置

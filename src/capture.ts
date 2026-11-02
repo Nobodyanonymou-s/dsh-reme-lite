@@ -50,6 +50,8 @@ export class Capture {
   lastHash: Map<string, string> = new Map();
   droppedDuplicates = 0;
   capturedTurns = 0;
+  /** Durable turns per session — the per-agent slice of the observability pie. */
+  sessionTurns: Map<string, number> = new Map();
   #locks: PathLocks;
 
   constructor(options: { root: string; interval?: number; timeZone?: string; locks?: PathLocks }) {
@@ -87,6 +89,7 @@ export class Capture {
       "utf8",
     );
     this.capturedTurns += 1;
+    this.sessionTurns.set(sessionId, (this.sessionTurns.get(sessionId) ?? 0) + 1);
 
     const buffer = this.buffers.get(sessionId) ?? [];
     buffer.push({ ...turn, text });
@@ -141,12 +144,23 @@ export class Capture {
     return written;
   }
 
-  stats(): { sessions: number; pending: number; capturedTurns: number; droppedDuplicates: number } {
+  stats(): {
+    sessions: number;
+    pending: number;
+    capturedTurns: number;
+    droppedDuplicates: number;
+    bySession: Record<string, number>;
+  } {
+    const bySession: Record<string, number> = {};
+    for (const [sessionId, count] of this.sessionTurns) {
+      bySession[sessionId.replace(/^session-/, "").slice(0, 8)] = count;
+    }
     return {
       sessions: this.buffers.size,
       pending: this.pending,
       capturedTurns: this.capturedTurns,
       droppedDuplicates: this.droppedDuplicates,
+      bySession,
     };
   }
 }

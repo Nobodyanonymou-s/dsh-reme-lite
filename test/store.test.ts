@@ -89,3 +89,11 @@ it("rebuild picks up external edits", async () => {
   assert.ok(top);
   assert.equal(top.relPath, "digest/wiki/新节点.md");
 });
+
+it("rebuild records how long it took", async () => {
+  const { store } = await makeStore();
+  await store.rebuild();
+  assert.equal(typeof store.lastRebuildMs, "number");
+  assert.ok(store.lastRebuildMs! >= 0);
+  assert.ok(store.stats().lastRebuildMs !== undefined, "stats surfaces the duration");
+});

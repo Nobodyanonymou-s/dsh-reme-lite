@@ -765,6 +765,16 @@ function registerRoutes(
         total: await runtime.conflicts.total(),
         recent: await runtime.conflicts.recent(),
       },
+      // Index cost and per-session capture counts: "how big has this gotten"
+      // and "who is actually feeding memory" are the two questions a shared
+      // workspace asks first when something feels slow or thin.
+      index: {
+        files: runtime.store.files.length,
+        chunks: runtime.store.index.size,
+        builtAt: new Date(runtime.store.builtAt).toISOString(),
+        lastRebuildMs: runtime.store.lastRebuildMs,
+      },
+      capture: runtime.capture.stats(),
     });
     return {
       ...status,
@@ -1239,9 +1249,16 @@ function registerTools(ctx: HostContext, runtime: ToolsRuntime): () => void {
         if (conflicting) notes.push("Conflict recorded — see metadata/conflicts.jsonl");
         if (supersedes) {
           // The correction is the point of the call: if the old node cannot be
-          // marked, say so instead of reporting a clean success.
-          await store.rewrite(supersedes, (text) => upsertFrontmatter(text, { status: "superseded" }));
-          notes.push(`Marked ${supersedes} as superseded (body kept, never deleted).`);
+          // marked, say so instead of reporting a clean success — and without
+          // claiming the write itself failed, because it did not.
+          try {
+            await store.rewrite(supersedes, (text) => upsertFrontmatter(text, { status: "superseded" }));
+            notes.push(`Marked ${supersedes} as superseded (body kept, never deleted).`);
+          } catch (error) {
+            notes.push(
+              `Warning: node written, but marking ${supersedes} as superseded failed (${describe(error)}). Re-run the write with the same supersedes to finish the correction.`,
+            );
+          }
         }
         return notes.length ? `${summary}\n${notes.join("\n")}` : summary;
       } catch (error) {

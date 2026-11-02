@@ -73,6 +73,8 @@ The default retrieval scope is `mine` — your own nodes plus the team layer; `s
 
 **The consolidation executor (0.4.0)**: the mount config gains `dreamExecutor` (empty = unrestricted). When set, every other agent calling `memory_dream` gets a one-line refusal: no material, no queue drain. A call that actually does consolidation work — it consumed queued requests or executed a scheduled occurrence — stamps `{ lastExecutor, lastExecutionAt }` into the task record; for the next five minutes another agent answering the same nag gets `Consolidation already run by …` with the queue left intact. That nag reaches every session at once, and this is what makes the consolidation run once and be recorded once. A plain material fetch (nothing queued, nothing scheduled) stamps nothing and serves anyone. `memory_schedule status` reports the executor and the last execution on its `executor:` line.
 
+**Self-observation (0.4.0)**: `/node-memory/status.json` also carries the index size with the last full rebuild's duration (`index.lastRebuildMs`) and per-session capture counts (`capture.bySession`) — when retrieval feels slow or one agent stops feeding memory, read those two fields before opening any file. Consolidation run history lives in `task.runs` (the same source as `memory_schedule status`'s `runs kept` line).
+
 **Boundary**: all of the above holds **within one Host process**. Two processes sharing one workspace directory are out of scope — lite ships no cross-process file locks; give each process its own workspace or add an external lock.
 
 ## Settings

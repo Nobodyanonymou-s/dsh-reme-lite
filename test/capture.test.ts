@@ -106,3 +106,18 @@ it("excerpt collapses whitespace and truncates", () => {
   assert.equal(excerpt("a\n\n  b"), "a b");
   assert.equal(excerpt("x".repeat(10), 5), "xxxx…");
 });
+
+it("stats breaks captured turns out per session", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mem-capture-"));
+  const capture = new Capture({ root, interval: 5 });
+  const at = new Date("2026-11-03T02:00:00Z").toISOString();
+  await capture.record("session-aaaa1111", { role: "user", text: "一", at });
+  await capture.record("session-aaaa1111", { role: "assistant", text: "二", at });
+  await capture.record("session-bbbb2222", { role: "user", text: "三", at });
+  // A duplicate is dropped before any counter moves.
+  await capture.record("session-bbbb2222", { role: "user", text: "三", at });
+
+  const stats = capture.stats();
+  assert.equal(stats.capturedTurns, 3);
+  assert.deepEqual(stats.bySession, { aaaa1111: 2, bbbb2222: 1 });
+});

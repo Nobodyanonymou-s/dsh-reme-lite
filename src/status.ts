@@ -87,12 +87,31 @@ export interface ConflictSummary {
   recent: ConflictEntry[];
 }
 
+/** Index cost facts the route reads straight off the store. */
+export interface IndexSummary {
+  files: number;
+  chunks: number;
+  builtAt: string;
+  lastRebuildMs: number | null;
+}
+
+/** Per-session capture counts, keyed by short session id. */
+export interface CaptureSummary {
+  sessions: number;
+  pending: number;
+  capturedTurns: number;
+  droppedDuplicates: number;
+  bySession: Record<string, number>;
+}
+
 export interface StatusInput {
   root: string;
   task?: Record<string, unknown> | null;
   days?: number;
   /** Optional so older callers keep working; absent means "none recorded". */
   conflicts?: ConflictSummary;
+  index?: IndexSummary;
+  capture?: CaptureSummary;
 }
 
 export interface StatusDay {
@@ -111,6 +130,9 @@ export interface StatusPayload {
   task: unknown;
   /** Red cells need a trail: who recorded a contradiction, and against what. */
   conflicts: ConflictSummary;
+  /** Index cost and capture volume; optional so older callers keep working. */
+  index?: IndexSummary;
+  capture?: CaptureSummary;
 }
 
 export async function buildStatus(input: StatusInput): Promise<StatusPayload> {
@@ -141,6 +163,8 @@ export async function buildStatus(input: StatusInput): Promise<StatusPayload> {
     })),
     task: input.task ?? null,
     conflicts: input.conflicts ?? { total: 0, recent: [] },
+    ...(input.index !== undefined ? { index: input.index } : {}),
+    ...(input.capture !== undefined ? { capture: input.capture } : {}),
   };
 }
 
