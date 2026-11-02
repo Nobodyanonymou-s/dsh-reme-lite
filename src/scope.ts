@@ -7,6 +7,8 @@
  *   session:     which session it came from
  *   room:        optional team-room label; empty means "the whole team"
  *   visibility:  only written when "private" — absent means team-shared
+ *   status:      node lifecycle; "superseded" / "retired" means history
+ *   supersedes:  path of the node this one corrects
  *
  * The layering is deliberately two-tier, not per-agent ACL:
  *
@@ -29,6 +31,8 @@ export interface ScopeMeta {
   session?: string;
   room?: string;
   visibility?: string;
+  status?: string;
+  supersedes?: string;
 }
 
 /** Read the scope fields out of parsed frontmatter; unknown values pass through as-is. */
@@ -38,15 +42,35 @@ export function parseScope(data: Record<string, string>): ScopeMeta {
   const session = (data.session ?? "").trim();
   const room = (data.room ?? "").trim();
   const visibility = (data.visibility ?? "").trim();
+  const status = (data.status ?? "").trim();
+  const supersedes = (data.supersedes ?? "").trim();
   if (agent) meta.agent = agent;
   if (session) meta.session = session;
   if (room) meta.room = room;
   if (visibility) meta.visibility = visibility;
+  if (status) meta.status = status;
+  if (supersedes) meta.supersedes = supersedes;
   return meta;
 }
 
 export function isPrivate(meta: ScopeMeta | undefined): boolean {
   return meta?.visibility === "private";
+}
+
+/** The two statuses that mean "this node is history, not current truth". */
+export const HIDDEN_STATUSES: readonly string[] = ["superseded", "retired"];
+
+/**
+ * Whether a node has been corrected away or retired.
+ *
+ * Corrections never delete: the old node keeps its text and gains
+ * `status: superseded`, so tomorrow's agent can still explain why a fact
+ * used to read differently. That is exactly why retrieval must skip it —
+ * a superseded node left in the default scope would answer queries with
+ * the very claim that was just corrected.
+ */
+export function isSuperseded(meta: ScopeMeta | undefined): boolean {
+  return HIDDEN_STATUSES.includes((meta?.status ?? "").trim());
 }
 
 /**

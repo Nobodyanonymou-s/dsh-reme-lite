@@ -20,7 +20,7 @@ import { PathLocks, atomicWriteFile } from "./atomic.ts";
 import { BM25 } from "./bm25.ts";
 import { chunkMarkdown, extractWikilinks, linkKey, parseFrontmatter } from "./markdown.ts";
 import type { Chunk } from "./markdown.ts";
-import { parseScope, visibleTo } from "./scope.ts";
+import { isSuperseded, parseScope, visibleTo } from "./scope.ts";
 import type { ScopeMeta, ScopeMode } from "./scope.ts";
 
 export interface SearchHit {
@@ -67,6 +67,12 @@ export interface SearchOptions {
   scope?: SearchScope;
   /** Exact room filter; a node with no room matches every room query. */
   room?: string;
+  /**
+   * Nodes marked `status: superseded` / `retired` are history, not current
+   * truth, and stay out of retrieval in every scope; this flag is how a caller
+   * asks for the trail explicitly (auditing a correction).
+   */
+  includeSuperseded?: boolean;
 }
 
 export class MemoryStore {
@@ -261,9 +267,14 @@ export class MemoryStore {
     const expandLinks = options.expandLinks ?? true;
     const viewer = options.scope?.viewer ?? "";
     const mode = options.scope?.mode ?? "mine";
+    const includeSuperseded = options.includeSuperseded ?? false;
     const retrievable = (relPath: string): boolean => {
       const file = this.files.find((f) => f.relPath === relPath);
       if (!file) return false;
+      // Corrections must not answer with the claim they just replaced, in any
+      // scope: a superseded node is history. Link expansion uses this same
+      // predicate, so a superseded neighbour does not expand either.
+      if (!includeSuperseded && isSuperseded(file.meta)) return false;
       if (!visibleTo(file.meta, viewer, mode)) return false;
       // An unlabelled room means "the whole team", so it matches every query;
       // a labelled node matches only its own room.
@@ -369,6 +380,29 @@ export class MemoryStore {
 
   async read(relPath: string): Promise<string> {
     return readFile(this.resolveInside(relPath), "utf8");
+  }
+
+  /**
+   * Rewrite a node in place through the same machinery as `write` — per-path
+   * lock, atomic rename, forced reindex of just this file. Built for the
+   * metadata-only edit a correction needs (marking the old node superseded),
+   * where the body must survive untouched: `transform` receives the text on
+   * disk and returns the next one, so no caller has to read outside the lock
+   * and risk writing back over a concurrent change. A missing node throws.
+   */
+  async rewrite(relPath: string, transform: (text: string) => string): Promise<{ relPath: string; bytes: number }> {
+    const normalized = relPath.replace(/\\/g, "/").replace(/^\/+/, "");
+    if (!/\.(md|markdown)$/i.test(normalized)) {
+      throw new Error(`memory nodes must be .md: ${normalized}`);
+    }
+    const absolute = this.resolveInside(normalized);
+    return this.#locks.run(absolute, async () => {
+      const current = await readFile(absolute, "utf8");
+      const next = transform(current);
+      await atomicWriteFile(absolute, next);
+      await this.#serialize(() => this.#reindexPath(normalized, true));
+      return { relPath: normalized, bytes: Buffer.byteLength(next, "utf8") };
+    });
   }
 
   async recentDaily(limit = 7): Promise<string[]> {

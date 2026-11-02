@@ -192,12 +192,34 @@ export interface NodeMeta {
   updated?: string;
   tags?: string[];
   kind?: string;
+  /** Node lifecycle: "superseded" / "retired" mark history (see scope.ts). */
+  status?: string;
+  /** Path of the node this one corrects — a correction never deletes. */
+  supersedes?: string;
   /** Writer identity and visibility — the team-face fields (see scope.ts). */
   agent?: string;
   session?: string;
   room?: string;
   visibility?: string;
 }
+
+/**
+ * The field order renderNode writes. `upsertFrontmatter` re-uses it so a
+ * round-trip through the store does not reshuffle a node's frontmatter.
+ */
+export const FIELD_ORDER: readonly string[] = [
+  "name",
+  "description",
+  "updated",
+  "tags",
+  "kind",
+  "status",
+  "supersedes",
+  "agent",
+  "session",
+  "room",
+  "visibility",
+];
 
 /**
  * Render a memory node with frontmatter.
@@ -212,6 +234,10 @@ export function renderNode(meta: NodeMeta, body: string): string {
   if (meta.tags?.length) fields.push(`tags: ${meta.tags.join(", ")}`);
   // `kind` drives the heatmap colour; written only when it is not the default.
   if (meta.kind && meta.kind !== "normal") fields.push(`kind: ${meta.kind}`);
+  // Correction is not deletion: `status` marks the old node as history and
+  // `supersedes` points at the node that replaced it, both written only when set.
+  if (meta.status) fields.push(`status: ${meta.status}`);
+  if (meta.supersedes) fields.push(`supersedes: ${meta.supersedes}`);
   if (meta.agent) fields.push(`agent: ${meta.agent}`);
   if (meta.session) fields.push(`session: ${meta.session}`);
   // Empty room means "the whole team" and is simply not written.
@@ -219,4 +245,39 @@ export function renderNode(meta: NodeMeta, body: string): string {
   if (meta.visibility === "private") fields.push(`visibility: private`);
   fields.push("---");
   return `${fields.join("\n")}\n\n${body.replace(/^\n+/, "")}\n`;
+}
+
+/**
+ * Merge `fields` into an existing node's frontmatter, leaving the body alone.
+ *
+ * This is how a correction marks its target: `upsertFrontmatter(old, { status:
+ * "superseded" })` keeps every other field and every body line byte-identical
+ * and changes only the named keys. It assumes the flat `key: value` shape
+ * renderNode produces — no lists beyond a `tags: a, b` line, no nesting, no
+ * comments — which holds for every node this plugin writes; a hand-edited
+ * exotic frontmatter is re-rendered flat rather than preserved verbatim.
+ * Body blank lines between paragraphs are kept; only the file's final newline
+ * is re-normalized to the single one renderNode writes, so repeated merges are
+ * idempotent instead of growing a blank line per rewrite.
+ */
+export function upsertFrontmatter(text: string, fields: Record<string, string>): string {
+  const { data, body } = parseFrontmatter(text);
+  const merged: Record<string, string> = { ...data, ...fields };
+  const lines = ["---"];
+  const written = new Set<string>();
+  // renderNode's order first, so a normal node never changes shape.
+  for (const key of FIELD_ORDER) {
+    const value = merged[key];
+    if (value) {
+      lines.push(`${key}: ${value}`);
+      written.add(key);
+    }
+  }
+  // Anything renderNode does not know about (a hand-added flat key) keeps its
+  // value and lands after the known fields instead of being dropped.
+  for (const [key, value] of Object.entries(merged)) {
+    if (!written.has(key) && value) lines.push(`${key}: ${value}`);
+  }
+  lines.push("---");
+  return `${lines.join("\n")}\n\n${body.replace(/^\n+/, "").replace(/\s+$/, "")}\n`;
 }
