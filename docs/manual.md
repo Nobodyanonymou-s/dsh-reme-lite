@@ -7,8 +7,8 @@
 
 | 工具 | 作用 |
 |---|---|
-| `memory_search(query, limit?, min_score?)` | 返回带行号的证据，附一跳 wikilink 邻居 |
-| `memory_write(path, content, name?, description?, kind?)` | 在 `daily/` 或 `digest/` 写入节点并重建索引 |
+| `memory_search(query, limit?, min_score?, scope?, room?)` | 返回带行号的证据，附一跳 wikilink 邻居；`scope=mine`（默认）/`team`，`room` 按房间过滤 |
+| `memory_write(path, content, name?, description?, kind?, scope?, room?)` | 在 `daily/` 或 `digest/` 写入节点，盖写入者身份章，增量重建索引 |
 | `memory_dream(days?)` | 取整理材料：近日 daily、现有 digest、以及规则 |
 | `memory_schedule(action)` | `status` · `run_now` · `enable` · `disable` |
 
@@ -50,6 +50,25 @@
 > 标紫：用户 10-25 原话「以后都按周五发版」
 ```
 
+## 团队与多 agent（0.3.0）
+
+一个工作区可以多个 agent 共用。要解决的问题是计划里那句反推：**一个 agent 的临时判断，不能被另一个 agent 当事实读走。**
+
+**归属**：每次 `memory_write` 在 frontmatter 盖三个章——`agent`（写入者：挂载配置 `agentName` > 会话的 agent preset > 会话短 id）、`session`（来源会话短 id）、`room`（可选房间标签，空 = 全队）。
+
+**可见性两层，不是每 agent 一张权限表**：
+
+| 层 | 怎么形成 | 谁能读 |
+|---|---|---|
+| 团队层 | `digest/` 的默认写入；自动捕获的 daily 页；所有旧节点（无 `visibility` 字段） | 所有人，任何 scope |
+| 私有层 | `daily/` 的默认写入（仅当写入者有**稳定身份**：`agentName` 或 agent preset——纯会话短 id 不落私有层，否则明天的会话就搜不到自己昨天的笔记），或显式 `scope=private` | 写入者本人；`scope=team` 审计视图 |
+
+检索默认 `scope=mine` = 自己的节点 + 团队层；`scope=team` 才会搜到别人的私有笔记——那是审计视图，不是墙。wikilink 邻居展开遵守同样的可见性：链接不会把过滤掉的内容漏出来。
+
+**并发写安全**：同一节点的并发写按路径排队（读改写不交错）、临时文件 + rename 落盘（读方永远见不到半个文件）、写入后只重建该文件的索引条目（BM25 文档墓碑替换，不再全目录重扫）。自动捕获与 `memory_write` 写同一个 daily 页时共享同一把锁。
+
+**边界**：以上都在**一个宿主进程内**成立。两个进程共享同一个工作区目录不在保证范围内——lite 不带跨进程文件锁；那种部署给每个进程独立工作区，或上外层锁。
+
 ## 设置
 
 两层，各有一个所有者：
@@ -64,6 +83,8 @@
 | `dreamCron` | `0 23 * * *` | 五段 cron |
 | `dreamTimeZone` | `Asia/Shanghai` | IANA 时区；留空表示宿主本地时间 |
 
+挂载 `config:` 块还有两个只在挂载层生效的键：`workspace`（工作区路径）与 `agentName`（固定写入者身份，团队挂载用它区分成员；留空则按会话推导）。
+
 ## 实现要点
 
 五个读代码前值得知道的决定：
@@ -72,6 +93,7 @@
 - **宿主侧编译后零运行时 `@deepseek-ai/*` 导入。** 从文件路径挂载的插件没有宿主包的解析根，运行时导入会失败在你自己的代码执行之前。源码里的 `@deepseek-ai/*` 都是 `import type`，编译期擦除；两个原本要 import 的 helper（`defineTool`、`createUserMessage`）按宿主实现内联了。「产物零运行时导入」由测试断言保证。挂载行按包名引用：要改名就同时改 `package.json#name` 和 `cordis.patch.yml` 里那一行。
 - **客户端是 classic script，不是 ES module。** DSH 用 `<script src>` 加载客户端包，唯一入口是 `window.__ModuleLoader__.load({ id, factory })`，`require()` 只解析壳层预置的 `react` 等。客户端由 tsdown 编译为 classic script（ModuleLoader banner 包裹），源码是常规 TS 模块；页面仍是手写 `React.createElement`，没有 JSX。
 - **浏览器读不到工作区。** 宿主提供两条同源路由：`/node-memory/status.json`（只有聚合计数，不发送记忆正文）与 `POST /node-memory/settings`（校验、原子写、检查 Origin）。
+- **写入是按路径串行 + 原子落盘 + 单文件增量重索引。** `src/atomic.ts` 提供这两件原语（`PathLocks` / `atomicWriteFile`）；store 和 capture 共享同一张锁表；BM25 的 `remove` 是墓碑式——存活文档的 id 永不移动，所以索引里存的引用在重索引后依然有效。全部索引变更再过一道全局串行，读永远不加锁。
 - **失败要可见（按需开启）。** 诊断 beacon 写 `~/.dsh/node-memory-boot.log`——GUI 启动没有 stdout，"静默未加载"和"什么都没做"看起来完全一样。默认关闭，排查挂载问题时设 `DSH_NODE_MEMORY_BEACON=1` 再启动。
 
 ## 已知限制
@@ -79,5 +101,6 @@
 - 没有向量检索。只有 BM25 和链接——对个人语料够用，不是搜索引擎。
 - 定时整理依赖会话接收提醒：提醒绑定在单个会话上，打开新会话时插件会把它搬过去；到点没有运行中的会话时，宿主在会话恢复后投递。整理执行依据是会话历史里的那条提醒——`memory_dream` 被调用时补记运行结果，所以「有任务」和「跑过」在状态里是两行不同的事实。
 - 没有资料摄入（PDF、图片）、没有 Studio、没有 MCP server。ReMe 三者都有。
-- 单工作区，暂不支持多 agent 共享或隔离。
+- 多 agent 共享在**单宿主进程**内安全（作用域 + 并发写排队）；跨进程共享同一工作区目录不在保证范围内。
+- 修正与遗忘仍是整文件替换：没有 `supersedes` 链和 retired 状态（路线图 G4）。
 - 未发布到 npm。两条安装通道：GitHub 源码 + 装机时构建（`prepare`，需在 profile 的 `pnpm-workspace.yaml` 里 `allowBuilds` 放行），或本地 `npm pack` 出的预编译 tarball。

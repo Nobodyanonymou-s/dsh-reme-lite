@@ -25,6 +25,7 @@ If you want ReMe's full pipeline (its own model calls, resource ingestion, Studi
 
 - **A workspace of plain Markdown** — `daily/` for the day's record, `digest/{personal,procedure,wiki}/` for durable knowledge, `session/dialog/` for raw turns, `metadata/` for rebuildable indexes
 - **`memory_search`** — BM25 over Chinese and English + one-hop `[[wikilink]]`, returning `path:line-range` evidence rather than a wall of text
+- **Multi-agent scoping (0.3.0)** — writes are stamped with `agent`/`session`; `digest/` defaults to the team layer, `daily/` to private-to-the-writer; the default retrieval is your own nodes plus the team layer, `scope=team` is the audit view; concurrent writes serialize per path, land atomically, and reindex one file
 - **Turn capture without a model** — completed turns land in the workspace as they happen; the daily excerpt never overwrites your own prose; same-day sessions merge in time order
 - **Scheduled consolidation, switchable** — a durable Host reminder fulfilled by the agent; history is kept when paused
 - **A settings page with a heatmap** — 26 weeks of memory activity, coloured by memory kind

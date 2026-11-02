@@ -192,6 +192,11 @@ export interface NodeMeta {
   updated?: string;
   tags?: string[];
   kind?: string;
+  /** Writer identity and visibility — the team-face fields (see scope.ts). */
+  agent?: string;
+  session?: string;
+  room?: string;
+  visibility?: string;
 }
 
 /**
@@ -207,6 +212,11 @@ export function renderNode(meta: NodeMeta, body: string): string {
   if (meta.tags?.length) fields.push(`tags: ${meta.tags.join(", ")}`);
   // `kind` drives the heatmap colour; written only when it is not the default.
   if (meta.kind && meta.kind !== "normal") fields.push(`kind: ${meta.kind}`);
+  if (meta.agent) fields.push(`agent: ${meta.agent}`);
+  if (meta.session) fields.push(`session: ${meta.session}`);
+  // Empty room means "the whole team" and is simply not written.
+  if (meta.room) fields.push(`room: ${meta.room}`);
+  if (meta.visibility === "private") fields.push(`visibility: private`);
   fields.push("---");
   return `${fields.join("\n")}\n\n${body.replace(/^\n+/, "")}\n`;
 }

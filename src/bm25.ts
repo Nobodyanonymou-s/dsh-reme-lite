@@ -52,6 +52,7 @@ export class BM25 {
   totalLength = 0;
   dirty = true;
   idfCache: Map<string, number> = new Map();
+  #live = 0;
 
   add(doc: Omit<Document, "id">): number {
     const id = this.docs.length;
@@ -62,6 +63,7 @@ export class BM25 {
     this.termFreqs.push(tf);
     this.lengths.push(tokens.length);
     this.totalLength += tokens.length;
+    this.#live += 1;
     for (const term of tf.keys()) {
       this.docFreqs.set(term, (this.docFreqs.get(term) ?? 0) + 1);
     }
@@ -69,8 +71,33 @@ export class BM25 {
     return id;
   }
 
+  /**
+   * Tombstone one document. Ids of the survivors stay stable, so stored
+   * references (this store's chunk list) survive a per-file reindex.
+   */
+  remove(id: number): boolean {
+    const doc = this.docs[id];
+    if (!doc) return false;
+    const tf = this.termFreqs[id] ?? new Map<string, number>();
+    for (const [term, count] of tf) {
+      const df = this.docFreqs.get(term);
+      if (df === undefined) continue;
+      const next = df - count;
+      if (next > 0) this.docFreqs.set(term, next);
+      else this.docFreqs.delete(term);
+      this.idfCache.delete(term);
+    }
+    this.totalLength -= this.lengths[id] ?? 0;
+    this.#live -= 1;
+    this.docs[id] = undefined as unknown as Document;
+    this.termFreqs[id] = new Map();
+    this.lengths[id] = 0;
+    this.dirty = true;
+    return true;
+  }
+
   get size(): number {
-    return this.docs.length;
+    return this.#live;
   }
 
   get averageLength(): number {
@@ -92,7 +119,9 @@ export class BM25 {
     const terms = tokenize(query);
     if (terms.length === 0 || this.size === 0) return [];
     const avgdl = this.averageLength || 1;
-    const scores: number[] = new Array(this.size).fill(0);
+    // Tombstoned ids stay in the array, so the loop bound is the physical
+    // length, not the live count.
+    const scores: number[] = new Array(this.docs.length).fill(0);
     // Repeated query terms should not multiply the score, but they do raise
     // the weight of the concept, so count them.
     const queryTf = new Map<string, number>();
@@ -102,7 +131,7 @@ export class BM25 {
       const df = this.docFreqs.get(term) ?? 0;
       if (df === 0) continue;
       const idf = this.idf(term);
-      for (let i = 0; i < this.size; i += 1) {
+      for (let i = 0; i < this.docs.length; i += 1) {
         const tf = this.termFreqs[i]?.get(term);
         if (!tf) continue;
         const norm = tf * (K1 + 1);
@@ -112,7 +141,7 @@ export class BM25 {
     }
 
     const hits: Hit[] = [];
-    for (let i = 0; i < this.size; i += 1) {
+    for (let i = 0; i < this.docs.length; i += 1) {
       const doc = this.docs[i];
       const score = scores[i] ?? 0;
       if (doc && score > minScore) hits.push({ doc, score });

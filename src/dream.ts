@@ -56,6 +56,9 @@ export const DREAM_RULES = [
   "   instead of adding a second, conflicting one.",
   "6. Prefer few good nodes over many thin ones. Deleting nothing is fine:",
   "   adding one correct node beats rewriting five.",
+  "7. digest nodes are the team layer — every agent reads them. Anything you",
+  "   are still unsure about stays in daily/ (private to its writer), not in",
+  "   digest: a settled team layer is worth more than a fast one.",
 ].join("\n");
 
 /**

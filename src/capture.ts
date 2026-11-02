@@ -8,8 +8,10 @@
  */
 
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+
+import { PathLocks, atomicWriteFile } from "./atomic.ts";
 
 export const AUTO_START = "<!-- notes:auto -->";
 export const AUTO_END = "<!-- /notes:auto -->";
@@ -48,10 +50,12 @@ export class Capture {
   lastHash: Map<string, string> = new Map();
   droppedDuplicates = 0;
   capturedTurns = 0;
+  #locks: PathLocks;
 
-  constructor(options: { root: string; interval?: number; timeZone?: string }) {
+  constructor(options: { root: string; interval?: number; timeZone?: string; locks?: PathLocks }) {
     this.root = options.root;
     this.interval = Math.max(1, options.interval ?? 5);
+    this.#locks = options.locks ?? new PathLocks();
   }
 
   get pending(): number {
@@ -92,7 +96,10 @@ export class Capture {
   }
 
   /**
-   * Fold the buffer into today's daily page.
+   * Fold the buffer into today's daily page. The read-modify-write runs under
+   * the shared per-path lock and lands with an atomic rename, so two sessions
+   * flushing the same day keep both their turns — the merge below settles the
+   * content, the lock settles the timing.
    */
   async flush(sessionId: string): Promise<string[] | null> {
     const turns = this.buffers.get(sessionId);
@@ -109,14 +116,16 @@ export class Capture {
     for (const [key, dayTurns] of byDate) {
       const relPath = `daily/${key}.md`;
       const absolute = join(this.root, "daily", `${key}.md`);
-      const existing = await readFile(absolute, "utf8").catch(() => null);
       const block = buildAutoBlock(dayTurns, sessionId);
-      const next =
-        existing === null
-          ? `---\nname: ${key}\ndescription: auto-captured conversation notes\n---\n\n${AUTO_START}\n${block}\n${AUTO_END}\n`
-          : upsertAutoBlock(existing, block);
-      await mkdir(join(this.root, "daily"), { recursive: true });
-      await writeFile(absolute, next, "utf8");
+      await this.#locks.run(absolute, async () => {
+        const existing = await readFile(absolute, "utf8").catch(() => null);
+        const next =
+          existing === null
+            ? `---\nname: ${key}\ndescription: auto-captured conversation notes\n---\n\n${AUTO_START}\n${block}\n${AUTO_END}\n`
+            : upsertAutoBlock(existing, block);
+        await mkdir(join(this.root, "daily"), { recursive: true });
+        await atomicWriteFile(absolute, next);
+      });
       written.push(relPath);
     }
     return written;

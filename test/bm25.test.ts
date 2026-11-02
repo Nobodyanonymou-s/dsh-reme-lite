@@ -50,3 +50,31 @@ it("minScore filters weak hits", () => {
   const strict = index.search("alpha", { minScore: 1000 });
   assert.equal(strict.length, 0);
 });
+
+it("removing a document keeps later documents findable", () => {
+  const index = new BM25();
+  const first = index.add({ text: "回滚 手工脚本", meta: { id: "old" } });
+  index.add({ text: "回滚 自动流水线", meta: { id: "new" } });
+  const tail = index.add({ text: "回滚 流水线演练", meta: { id: "tail" } });
+
+  assert.equal(index.remove(first), true);
+  assert.equal(index.size, 2);
+
+  // The removed text stops matching entirely.
+  assert.equal(index.search("手工脚本").length, 0);
+
+  // Survivors stay findable — including the one after the tombstone, whose id
+  // no longer sits inside `size`. (Both survivors share the 流水/水线 bigrams,
+  // so the query legitimately reaches both; the point is that neither is lost.)
+  const rerolled = index.search("自动流水线");
+  assert.equal(rerolled.length, 2);
+  assert.ok(rerolled.every((hit) => hit.doc.meta.id !== "old"), "the tombstone never matches");
+  const drills = index.search("演练");
+  assert.equal(drills.length, 1);
+  assert.equal(drills[0]!.doc.meta.id, "tail");
+  assert.equal(tail, 2, "survivor ids never shift");
+
+  // Removing twice is a no-op.
+  assert.equal(index.remove(first), false);
+  assert.equal(index.size, 2);
+});

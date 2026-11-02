@@ -718,3 +718,132 @@ it("a host delivery record credits the scheduled run without session history", a
   assert.equal(state.lastStatus, "ok");
   assert.equal(state.nextRunAt, "2026-10-30T15:00:00.000Z", "the next run follows the delivered occurrence");
 });
+
+it("memory_write stamps the writer identity and defaults visibility by path", async () => {
+  const root = await workspace();
+  const { ctx, tools } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false });
+  await settle();
+
+  const write = tools.find((tool: any) => tool.name === "memory_write");
+  const exec = {
+    agent: { session: { id: "session-9f21ab", header: { id: "session-9f21ab", agentPreset: "librarian" } } },
+  };
+
+  // daily/: the writer's tentative layer — private by default.
+  const daily = await write.execute(
+    { path: "daily/2026-11-02.md", content: "# 猜测\n\n发布窗口可能改到周三，未证实。" },
+    exec,
+  );
+  assert.match(daily, /Visibility: private to you\./);
+  const dailyText = await readFile(join(root, "daily", "2026-11-02.md"), "utf8");
+  assert.match(dailyText, /agent: librarian/);
+  assert.match(dailyText, /session: 9f21ab/);
+  assert.match(dailyText, /visibility: private/);
+
+  // digest/, the curated layer — team-shared by default, no visibility line.
+  const digest = await write.execute(
+    { path: "digest/wiki/发布流程.md", content: "# 发布流程\n\n发布窗口是周五下午四点。" },
+    exec,
+  );
+  assert.match(digest, /Visibility: team\./);
+  const digestText = await readFile(join(root, "digest/wiki/发布流程.md"), "utf8");
+  assert.match(digestText, /agent: librarian/);
+  assert.doesNotMatch(digestText, /visibility:/);
+
+  // An explicit scope overrides the path default, and room is recorded.
+  await write.execute(
+    { path: "daily/2026-11-03.md", content: "# 当日\n\n团队站会记录。", scope: "team", room: "hangar" },
+    exec,
+  );
+  const shared = await readFile(join(root, "daily", "2026-11-03.md"), "utf8");
+  assert.doesNotMatch(shared, /visibility:/);
+  assert.match(shared, /room: hangar/);
+});
+
+it("memory_search isolates agents' private notes and scope=team is the audit view", async () => {
+  const root = await workspace();
+  const { ctx, tools } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false });
+  await settle();
+
+  const write = tools.find((tool: any) => tool.name === "memory_write");
+  const search = tools.find((tool: any) => tool.name === "memory_search");
+
+  const librarian = { agent: { session: { id: "session-aaaaaaaa", header: { id: "session-aaaaaaaa", agentPreset: "librarian" } } } };
+  const builder = { agent: { session: { id: "session-bbbbbbbb", header: { id: "session-bbbbbbbb", agentPreset: "builder" } } } };
+
+  await write.execute(
+    { path: "daily/2026-11-02.md", content: "# 猜测\n\n预算大概会被砍三成，未证实。" },
+    librarian,
+  );
+
+  // The builder's default retrieval: the librarian's tentative note is absent.
+  const asBuilder = await search.execute({ query: "预算" }, builder);
+  assert.equal(asBuilder, "No relevant memory found.");
+
+  // scope=team is the audit view: it reaches private notes.
+  const audit = await search.execute({ query: "预算", scope: "team" }, builder);
+  assert.match(audit, /daily\/2026-11-02\.md/);
+
+  // The writer finds their own note with the default scope.
+  const asWriter = await search.execute({ query: "预算" }, librarian);
+  assert.match(asWriter, /daily\/2026-11-02\.md/);
+
+  // A digest node is the team layer: visible to the builder by default.
+  await write.execute(
+    { path: "digest/wiki/预算流程.md", content: "# 预算流程\n\n预算审批走财务系统。" },
+    librarian,
+  );
+  const teamLayer = await search.execute({ query: "预算审批" }, builder);
+  assert.match(teamLayer, /digest\/wiki\/预算流程\.md/);
+});
+
+it("agentIdentity prefers the configured name, then the preset, then the session", async () => {
+  const { agentIdentity } = await import("../src/index.ts");
+  const exec = { agent: { session: { id: "session-abcdef12", header: { id: "session-abcdef12", agentPreset: "librarian" } } } };
+  assert.equal(agentIdentity(exec, { agentName: "whale-7" }), "whale-7");
+  assert.equal(agentIdentity(exec, { agentName: "" }), "librarian");
+  assert.equal(
+    agentIdentity({ agent: { session: { id: "session-abcdef12", header: { id: "session-abcdef12" } } } }, { agentName: "" }),
+    "abcdef12",
+  );
+  assert.equal(agentIdentity(undefined, { agentName: "" }), "host");
+});
+
+it("a session-only identity writes the team layer, not a private one", async () => {
+  const root = await workspace();
+  const { ctx, tools } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false });
+  await settle();
+
+  const write = tools.find((tool: any) => tool.name === "memory_write");
+  const search = tools.find((tool: any) => tool.name === "memory_search");
+  // No agentName, no agentPreset: the identity degrades to the session short
+  // id, which changes with every session. Private-to-a-session would orphan
+  // the note from tomorrow's session — the single-user regression.
+  const exec = { agent: { session: { id: "session-cccccccc", header: { id: "session-cccccccc" } } } };
+
+  const wrote = await write.execute(
+    { path: "daily/2026-11-02.md", content: "# 猜测\n\n发布窗口可能改到周三，未证实。" },
+    exec,
+  );
+  assert.match(wrote, /Visibility: team\./);
+  const text = await readFile(join(root, "daily", "2026-11-02.md"), "utf8");
+  assert.doesNotMatch(text, /visibility:/);
+
+  // Tomorrow's session — a different short id — still finds the note.
+  const tomorrow = { agent: { session: { id: "session-dddddddd", header: { id: "session-dddddddd" } } } };
+  const found = await search.execute({ query: "发布窗口" }, tomorrow);
+  assert.match(found, /daily\/2026-11-02\.md/);
+});
+
+it("stableIdentity requires a name or a preset, not a bare session id", async () => {
+  const { stableIdentity } = await import("../src/index.ts");
+  const presetExec = { agent: { session: { id: "s-1", header: { id: "s-1", agentPreset: "librarian" } } } };
+  const bareExec = { agent: { session: { id: "s-2", header: { id: "s-2" } } } };
+  assert.equal(stableIdentity(presetExec, { agentName: "" }), true);
+  assert.equal(stableIdentity(bareExec, { agentName: "" }), false);
+  assert.equal(stableIdentity(bareExec, { agentName: "whale-7" }), true);
+  assert.equal(stableIdentity(undefined, { agentName: "" }), false);
+});
