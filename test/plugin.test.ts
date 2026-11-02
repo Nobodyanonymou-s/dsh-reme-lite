@@ -847,3 +847,158 @@ it("stableIdentity requires a name or a preset, not a bare session id", async ()
   assert.equal(stableIdentity(bareExec, { agentName: "whale-7" }), true);
   assert.equal(stableIdentity(undefined, { agentName: "" }), false);
 });
+
+/** Two agents sharing one workspace, the way a team mount runs. */
+const LIBRARIAN = {
+  agent: { session: { id: "session-aaaaaaaa", header: { id: "session-aaaaaaaa", agentPreset: "librarian" } } },
+};
+const BUILDER = {
+  agent: { session: { id: "session-bbbbbbbb", header: { id: "session-bbbbbbbb", agentPreset: "builder" } } },
+};
+
+async function queueRequest(root: string, id: string, createdAt = "2026-10-25T00:00:00.000Z"): Promise<void> {
+  await mkdir(join(root, "metadata", "dream-queue"), { recursive: true });
+  await writeFile(
+    join(root, "metadata", "dream-queue", `${id}.json`),
+    JSON.stringify({ id, createdAt, reason: "timer", material: "queued material" }),
+    "utf8",
+  );
+}
+
+it("a designated executor is the only agent that consolidates", async () => {
+  const root = await workspace();
+  const { ctx, tools } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false, dreamExecutor: "librarian" });
+  await settle();
+
+  const write = tools.find((tool: any) => tool.name === "memory_write");
+  const dream = tools.find((tool: any) => tool.name === "memory_dream");
+  await write.execute({ path: "daily/2026-11-01.md", content: "# 11-01\n\n素材一页。" }, {});
+
+  // Not the executor: one-line refusal, and nothing is consumed or stamped.
+  const refused = await dream.execute({}, BUILDER);
+  assert.equal(refused, "Consolidation is designated to librarian; you are builder. Only read memory if you need it.");
+  assert.ok(!existsSync(join(root, "metadata", "dream-task.json")), "a refused call records nothing");
+  assert.deepEqual(await readdir(join(root, "metadata", "dream-queue")).catch(() => []), []);
+
+  // The executor gets the material.
+  const material = await dream.execute({}, LIBRARIAN);
+  assert.match(material, /Recent daily pages/);
+  assert.match(material, /daily\/2026-11-01\.md/);
+  // A plain material fetch earns no claim: there was no work to do.
+  assert.ok(!existsSync(join(root, "metadata", "dream-task.json")), "a manual fetch stamps no claim");
+});
+
+it("a queued request is consumed once, and the fresh claim blocks a duplicate run", async () => {
+  const root = await workspace();
+  const { ctx, tools } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false, language: "en" });
+  await settle();
+
+  const write = tools.find((tool: any) => tool.name === "memory_write");
+  const dream = tools.find((tool: any) => tool.name === "memory_dream");
+  await write.execute({ path: "daily/2026-10-24.md", content: "# 10-24\n\n周报用 Markdown。" }, {});
+
+  // The nag: one queued request, seen by every new session.
+  await queueRequest(root, "2026-10-25T00-00-00-000Z-abcd");
+  const material = await dream.execute({}, LIBRARIAN);
+  assert.match(material, /\(1 pending consolidation request\(s\) consumed\.\)/);
+  assert.deepEqual(await readdir(join(root, "metadata", "dream-queue")), []);
+
+  const state = JSON.parse(await readFile(join(root, "metadata", "dream-task.json"), "utf8"));
+  assert.equal(state.lastExecutor, "librarian", "the claim names who ran");
+  assert.ok(state.lastExecutionAt, "…and when");
+
+  // The nag arrives again while that run is still fresh: another agent must
+  // not consolidate the same work a second time.
+  await queueRequest(root, "2026-10-25T00-05-00-000Z-beef");
+  const again = await dream.execute({}, BUILDER);
+  assert.equal(again, `Consolidation already run by librarian at ${state.lastExecutionAt}; nothing to do.`);
+  assert.deepEqual(
+    await readdir(join(root, "metadata", "dream-queue")),
+    ["2026-10-25T00-05-00-000Z-beef.json"],
+    "the refused call consumes nothing",
+  );
+  const after = JSON.parse(await readFile(join(root, "metadata", "dream-task.json"), "utf8"));
+  assert.equal(after.lastExecutor, "librarian", "the claim still names the first runner");
+
+  // The same agent may retry its own work — the guard is about duplicates, not locks.
+  const retried = await dream.execute({}, LIBRARIAN);
+  assert.match(retried, /\(1 pending consolidation request\(s\) consumed\.\)/);
+});
+
+it("a stale claim no longer blocks consolidation", async () => {
+  const root = await workspace();
+  await mkdir(join(root, "metadata"), { recursive: true });
+  await writeFile(
+    join(root, "metadata", "dream-task.json"),
+    JSON.stringify({
+      id: "dream",
+      enabled: false,
+      cron: "0 23 * * *",
+      createdAt: "2026-10-20T00:00:00.000Z",
+      updatedAt: "2026-10-20T00:00:00.000Z",
+      runs: [],
+      lastExecutor: "librarian",
+      lastExecutionAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    }),
+    "utf8",
+  );
+  const { ctx, tools } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false, language: "en" });
+  await settle();
+
+  await queueRequest(root, "2026-10-25T00-00-00-000Z-abcd");
+  const material = await tools.find((item: any) => item.name === "memory_dream").execute({}, BUILDER);
+  assert.match(material, /\(1 pending consolidation request\(s\) consumed\.\)/, "past the window, the work proceeds");
+  const state = JSON.parse(await readFile(join(root, "metadata", "dream-task.json"), "utf8"));
+  assert.equal(state.lastExecutor, "builder", "the claim moves to who actually ran");
+});
+
+it("a manual material fetch serves any agent when no executor is set", async () => {
+  const root = await workspace();
+  const { ctx, tools } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false });
+  await settle();
+
+  const write = tools.find((tool: any) => tool.name === "memory_write");
+  const dream = tools.find((tool: any) => tool.name === "memory_dream");
+  await write.execute({ path: "daily/2026-11-01.md", content: "# 11-01\n\n素材一页。" }, {});
+
+  assert.match(await dream.execute({}, LIBRARIAN), /Recent daily pages/);
+  assert.match(await dream.execute({}, BUILDER), /Recent daily pages/);
+  assert.ok(!existsSync(join(root, "metadata", "dream-task.json")), "no claim, no run record");
+});
+
+it("memory_schedule names the executor and the last execution", async () => {
+  const root = await workspace();
+  const { ctx, tools } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false, dreamExecutor: "librarian" });
+  await settle();
+
+  const schedule = tools.find((tool: any) => tool.name === "memory_schedule");
+  const dream = tools.find((tool: any) => tool.name === "memory_dream");
+  const agent = fakeAgent("session-exec", []);
+  ctx.emit("agent/created", { agent });
+  await settle();
+
+  const before = await schedule.execute({ action: "status" }, { agent });
+  assert.match(before, /executor: librarian/);
+  assert.ok(!before.includes("last executed"), "nothing has run yet");
+
+  // A claim-stamping dream makes the status show who ran, and when.
+  await queueRequest(root, "2026-10-25T00-00-00-000Z-abcd");
+  await dream.execute({}, LIBRARIAN);
+  const after = await schedule.execute({ action: "status" }, { agent });
+  assert.match(after, /executor: librarian · last executed by librarian at \d{4}-\d{2}-\d{2}T/);
+
+  // No designated executor reads as "any".
+  const free = await workspace();
+  const { ctx: ctx2, tools: tools2 } = makeCtx(fakeSchedule());
+  apply(ctx2 as never, { workspace: free, dreamEnabled: false });
+  await settle();
+  const open = await tools2
+    .find((item: any) => item.name === "memory_schedule")
+    .execute({ action: "status" }, { agent: fakeAgent("session-open", []) });
+  assert.match(open, /executor: any/);
+});

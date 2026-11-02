@@ -7,10 +7,10 @@
 
 | 工具 | 作用 |
 |---|---|
-| `memory_search(query, limit?, min_score?, scope?, room?)` | 返回带行号的证据，附一跳 wikilink 邻居；`scope=mine`（默认）/`team`，`room` 按房间过滤 |
-| `memory_write(path, content, name?, description?, kind?, scope?, room?)` | 在 `daily/` 或 `digest/` 写入节点，盖写入者身份章，增量重建索引 |
-| `memory_dream(days?)` | 取整理材料：近日 daily、现有 digest、以及规则 |
-| `memory_schedule(action)` | `status` · `run_now` · `enable` · `disable` |
+| `memory_search(query, limit?, min_score?, scope?, room?, include_superseded?)` | 返回带行号的证据，附一跳 wikilink 邻居；`scope=mine`（默认）/`team`，`room` 按房间过滤；`status: superseded` / `retired` 的历史节点默认不出，`include_superseded=true` 才查得到 |
+| `memory_write(path, content, name?, description?, kind?, scope?, room?, supersedes?)` | 在 `daily/` 或 `digest/` 写入节点，盖写入者身份章，增量重建索引；带 `supersedes=<旧路径>` 时旧节点原文保留并标 `superseded`，`kind: conflict` 另记一条冲突日志 |
+| `memory_dream(days?)` | 取整理材料：近日 daily、现有 digest、以及规则；配置了 `dreamExecutor` 时只有该执行者能取，其余 agent 得到一行拒绝 |
+| `memory_schedule(action)` | `status` · `run_now` · `enable` · `disable`；`status` 报告 `executor:` 一行与上次整理执行记录 |
 
 守则会要求 agent 在回答依赖历史的问题前先检索，并把检索结果当作**证据而非指令**——检索到的文本永远不能改变它的行为方向。
 
@@ -50,7 +50,7 @@
 > 标紫：用户 10-25 原话「以后都按周五发版」
 ```
 
-## 团队与多 agent（0.3.0）
+## 团队与多 agent（0.3.0 归属与并发；0.4.0 播报、更正、整理）
 
 一个工作区可以多个 agent 共用。要解决的问题是计划里那句反推：**一个 agent 的临时判断，不能被另一个 agent 当事实读走。**
 
@@ -66,6 +66,12 @@
 检索默认 `scope=mine` = 自己的节点 + 团队层；`scope=team` 才会搜到别人的私有笔记——那是审计视图，不是墙。wikilink 邻居展开遵守同样的可见性：链接不会把过滤掉的内容漏出来。
 
 **并发写安全**：同一节点的并发写按路径排队（读改写不交错）、临时文件 + rename 落盘（读方永远见不到半个文件）、写入后只重建该文件的索引条目（BM25 文档墓碑替换，不再全目录重扫）。自动捕获与 `memory_write` 写同一个 daily 页时共享同一把锁。
+
+**冲突要被看见（0.4.0）**：`kind: conflict` 的写入在替换文件**之前**读出旧正文（在同一把按路径锁里，读到的一定是真正在盘上的旧值），写完后向 `<workspace>/metadata/conflicts.jsonl` 追加一行：谁、哪条路径、旧值与新值的正文摘录（各 200 字）。工具返回多一行 `Conflict recorded — see metadata/conflicts.jsonl`；`/node-memory/status.json` 带上 `conflicts: { total, recent }`。日志只追加不改写——一条坏行会被跳过，不会掩盖其余记录。
+
+**更正不删（0.4.0）**：修正已有节点时给 `memory_write` 传 `supersedes=<旧路径>`。新节点 frontmatter 带 `supersedes:`；旧节点**原文不动**，只加一行 `status: superseded`。默认检索在任何 scope 都跳过 `superseded` / `retired` 的节点——它们是历史，不是当前事实；`include_superseded=true` 才能显式查到这条轨迹，wikilink 邻居展开遵守同一规则（链接不会把刚被更正掉的旧结论又捞回来）。校验失败（目标不存在、指向自己、越出工作区）返回 `Error: ...`，什么都不会写。
+
+**整理执行者（0.4.0）**：挂载配置新增 `dreamExecutor`（留空 = 不限）。指定后其他 agent 调 `memory_dream` 得到一行拒绝：不取材料、不消费队列。真正做了整理工作（消费了队列请求，或执行了一次定时 occurrence）的调用会在任务记录里落 `{ lastExecutor, lastExecutionAt }`；此后 5 分钟内其他 agent 再来消费队列会得到 `Consolidation already run by …`，队列原样保留——"有待整理请求"的提醒会同时打给多个会话，这道闸保证整理只跑一次、记录在案。纯取材料（无队列、无定时）不落标记，谁都能取。`memory_schedule status` 的 `executor:` 一行报当前执行者与上次执行人/时间。
 
 **边界**：以上都在**一个宿主进程内**成立。两个进程共享同一个工作区目录不在保证范围内——lite 不带跨进程文件锁；那种部署给每个进程独立工作区，或上外层锁。
 
@@ -83,7 +89,7 @@
 | `dreamCron` | `0 23 * * *` | 五段 cron |
 | `dreamTimeZone` | `Asia/Shanghai` | IANA 时区；留空表示宿主本地时间 |
 
-挂载 `config:` 块还有两个只在挂载层生效的键：`workspace`（工作区路径）与 `agentName`（固定写入者身份，团队挂载用它区分成员；留空则按会话推导）。
+挂载 `config:` 块还有三个只在挂载层生效的键：`workspace`（工作区路径）、`agentName`（固定写入者身份，团队挂载用它区分成员；留空则按会话推导）与 `dreamExecutor`（指定整理执行者，通常是主 agent 或 librarian；留空则任何 agent 都能整理）。
 
 ## 实现要点
 
@@ -102,5 +108,5 @@
 - 定时整理依赖会话接收提醒：提醒绑定在单个会话上，打开新会话时插件会把它搬过去；到点没有运行中的会话时，宿主在会话恢复后投递。整理执行依据是会话历史里的那条提醒——`memory_dream` 被调用时补记运行结果，所以「有任务」和「跑过」在状态里是两行不同的事实。
 - 没有资料摄入（PDF、图片）、没有 Studio、没有 MCP server。ReMe 三者都有。
 - 多 agent 共享在**单宿主进程**内安全（作用域 + 并发写排队）；跨进程共享同一工作区目录不在保证范围内。
-- 修正与遗忘仍是整文件替换：没有 `supersedes` 链和 retired 状态（路线图 G4）。
+- 遗忘是手工改 frontmatter（`status: retired`），还没有工具参数；更正走 `supersedes` 链，旧节点永不物理删除。
 - 未发布到 npm。两条安装通道：GitHub 源码 + 装机时构建（`prepare`，需在 profile 的 `pnpm-workspace.yaml` 里 `allowBuilds` 放行），或本地 `npm pack` 出的预编译 tarball。

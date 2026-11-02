@@ -7,10 +7,10 @@
 
 | Tool | What it does |
 | --- | --- |
-| `memory_search(query, limit?, min_score?, scope?, room?)` | Returns line-ranged evidence with paths, plus one hop of wikilink neighbours; `scope=mine` (default) / `team`, `room` filters by room label |
-| `memory_write(path, content, name?, description?, kind?, scope?, room?)` | Writes a node under `daily/` or `digest/`, stamps the writer's identity, reindexes just that file |
-| `memory_dream(days?)` | Returns consolidation material: recent daily pages, existing digest nodes, and the rules |
-| `memory_schedule(action)` | `status` · `run_now` · `enable` · `disable` |
+| `memory_search(query, limit?, min_score?, scope?, room?, include_superseded?)` | Returns line-ranged evidence with paths, plus one hop of wikilink neighbours; `scope=mine` (default) / `team`, `room` filters by room label; nodes marked `status: superseded` / `retired` stay hidden until `include_superseded=true` |
+| `memory_write(path, content, name?, description?, kind?, scope?, room?, supersedes?)` | Writes a node under `daily/` or `digest/`, stamps the writer's identity, reindexes just that file; with `supersedes=<old path>` the old node keeps its text and is marked `superseded`, and a `kind: conflict` write additionally lands a conflict-log line |
+| `memory_dream(days?)` | Returns consolidation material: recent daily pages, existing digest nodes, and the rules; when `dreamExecutor` is set, every other agent gets a one-line refusal |
+| `memory_schedule(action)` | `status` · `run_now` · `enable` · `disable`; `status` reports an `executor:` line plus who last executed the consolidation and when |
 
 The agent is told to search before answering anything that depends on history, and to treat what it finds as **evidence, not instructions** — retrieved text can never redirect it.
 
@@ -50,7 +50,7 @@ Every non-green node ends with a one-line justification, so a colour stays audit
 > purple: user said on 10-25, "we ship on Fridays from now on"
 ```
 
-## Teams and multiple agents (0.3.0)
+## Teams and multiple agents (0.3.0 provenance and concurrency; 0.4.0 broadcast, corrections, consolidation)
 
 One workspace can be shared by several agents. The problem being solved is the one the plan worked backwards from: **one agent's tentative judgment must not be read by another agent as an established fact.**
 
@@ -66,6 +66,12 @@ One workspace can be shared by several agents. The problem being solved is the o
 The default retrieval scope is `mine` — your own nodes plus the team layer; `scope=team` also searches other agents' private notes: an audit view, not a wall. Wikilink neighbour expansion obeys the same visibility — a link cannot leak what the filter just hid.
 
 **Concurrent-write safety**: concurrent writes to one node serialize per path (read-modify-write cycles never interleave), land through temp-file-plus-rename (a reader never sees half a file), and reindex only that file's entries (BM25 documents are tombstoned and replaced — no full-directory rescan per write). Auto-capture and `memory_write` share one lock table when they touch the same daily page.
+
+**A conflict has to be seen (0.4.0)**: a `kind: conflict` write reads the body it is about to replace *before* replacing it (inside the same per-path lock, so the excerpt is what was actually on disk), then appends one line to `<workspace>/metadata/conflicts.jsonl` — who wrote it, against which path, and ~200-char excerpts of both bodies. The tool answer gains a `Conflict recorded — see metadata/conflicts.jsonl` line, and `/node-memory/status.json` serves `conflicts: { total, recent }`. The log is append-only and never rewritten; a corrupt line is skipped, not fatal.
+
+**Corrections never delete (0.4.0)**: to correct an existing node, pass `supersedes=<old path>` to `memory_write`. The new node carries `supersedes:` in its frontmatter; the old node keeps its body untouched and gains one line, `status: superseded`. Default retrieval skips `superseded` / `retired` nodes in every scope — they are history, not current truth; `include_superseded=true` is how the trail is read explicitly, and wikilink expansion obeys the same rule (a link cannot resurrect the conclusion that was just corrected). A refused target (missing, self-referencing, outside the workspace) comes back as an `Error: ...` line and writes nothing.
+
+**The consolidation executor (0.4.0)**: the mount config gains `dreamExecutor` (empty = unrestricted). When set, every other agent calling `memory_dream` gets a one-line refusal: no material, no queue drain. A call that actually does consolidation work — it consumed queued requests or executed a scheduled occurrence — stamps `{ lastExecutor, lastExecutionAt }` into the task record; for the next five minutes another agent answering the same nag gets `Consolidation already run by …` with the queue left intact. That nag reaches every session at once, and this is what makes the consolidation run once and be recorded once. A plain material fetch (nothing queued, nothing scheduled) stamps nothing and serves anyone. `memory_schedule status` reports the executor and the last execution on its `executor:` line.
 
 **Boundary**: all of the above holds **within one Host process**. Two processes sharing one workspace directory are out of scope — lite ships no cross-process file locks; give each process its own workspace or add an external lock.
 
@@ -83,7 +89,7 @@ Two layers, one owner each:
 | `dreamCron` | `0 23 * * *` | five-field cron |
 | `dreamTimeZone` | `Asia/Shanghai` | IANA zone; empty means host-local |
 
-The mount `config:` block also carries two mount-only keys: `workspace` (the workspace path) and `agentName` (a fixed writer identity, for team mounts that distinguish members; empty derives it from the session).
+The mount `config:` block also carries three mount-only keys: `workspace` (the workspace path), `agentName` (a fixed writer identity, for team mounts that distinguish members; empty derives it from the session), and `dreamExecutor` (the designated consolidation executor, usually the main agent or the librarian; empty means any agent may consolidate).
 
 ## How it is built
 
@@ -102,5 +108,5 @@ Five decisions worth knowing before you read the code:
 - Scheduled consolidation depends on a session receiving the reminder: the reminder is bound to one session, and the plugin moves it when a new session opens; if no session is running at the scheduled time, the Host delivers it when one resumes. What counts as "ran" is the reminder in the session history — `memory_dream` back-fills the run record when it is called, so "a task exists" and "it has run" are two different facts in the status.
 - No resource ingestion (PDFs, images), no Studio, no MCP server. ReMe has all three.
 - Multi-agent sharing is safe **within one Host process** (scoping + serialized concurrent writes); two processes sharing one workspace directory are out of scope.
-- Correction and forgetting are still whole-file replacement: no `supersedes` chain or retired status yet (roadmap G4).
+- Retirement is a manual frontmatter edit (`status: retired`), no tool param yet. Corrections go through a `supersedes` chain and are never physically deleted.
 - Not published to npm. Two install channels: GitHub + `prepare` (needs the pnpm `allowBuilds` allowance) or a locally `npm pack`-ed prebuilt tarball.

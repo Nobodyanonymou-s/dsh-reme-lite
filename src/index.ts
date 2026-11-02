@@ -133,6 +133,7 @@ export const Config = await (async () => {
       workspace: z.string().default(""),
       language: z.string().default("auto"),
       agentName: z.string().default(""),
+      dreamExecutor: z.string().default(""),
       captureEnabled: z.boolean().default(true),
       rootAgentsOnly: z.boolean().default(true),
       captureInterval: z.number().step(1).min(1).max(1000).default(5),
@@ -281,12 +282,25 @@ const TICK_MS = 30_000;
 const MAX_EVIDENCE_CHARS = 4000;
 /** Width of the before/after excerpts a conflict line carries: enough to recognise the claim, not the whole node. */
 const CONFLICT_EXCERPT_CHARS = 200;
+/**
+ * How long a consolidation claim blocks the other agents. The nag re-fills the
+ * queue as soon as new work exists, so without a window every session that
+ * received it would consolidate the same days within seconds of each other.
+ */
+const DREAM_CLAIM_TTL_MS = 5 * 60_000;
 
 export interface MemoryConfig {
   workspace: string;
   language: "zh" | "en";
   /** Stable writer identity for teams; empty = derive from each session. */
   agentName: string;
+  /**
+   * The one agent allowed to run consolidation; empty = anyone. Team mounts
+   * name one executor (usually the librarian or the main agent) so the
+   * "pending consolidation" nag does not make every session consolidate the
+   * same days at once. Mount-only, like `agentName`.
+   */
+  dreamExecutor: string;
   captureEnabled: boolean;
   rootAgentsOnly: boolean;
   captureInterval: number;
@@ -369,6 +383,7 @@ export function resolveConfig(input: Partial<MemoryConfig> = {}, env: NodeJS.Pro
     workspace: input.workspace || env.DSH_MEMORY_ROOT || join(dshHome, "memory"),
     language,
     agentName: (input.agentName || "").trim().slice(0, 64),
+    dreamExecutor: (input.dreamExecutor || "").trim().slice(0, 64),
     captureEnabled: input.captureEnabled ?? true,
     rootAgentsOnly: input.rootAgentsOnly ?? true,
     captureInterval: clamp(input.captureInterval ?? 5, 1, 1000, 5),
@@ -1253,15 +1268,34 @@ function registerTools(ctx: HostContext, runtime: ToolsRuntime): () => void {
       days: { type: "integer", description: "How many recent daily pages to include, 1 to 30." },
     },
     async execute(args, exec) {
+      const caller = agentIdentity(exec, config);
+      // A team that names one executor does not need every session racing to
+      // consolidate the same days. Refuse before touching anything: no queue
+      // drain, no claim, no material.
+      if (config.dreamExecutor && caller !== config.dreamExecutor) {
+        return `Consolidation is designated to ${config.dreamExecutor}; you are ${caller}. Only read memory if you need it.`;
+      }
       await refresh();
-      // Delivering the material satisfies whatever queued a request: the
-      // caller now holds it. Leaving the queue untouched would nag forever.
-      const consumed = await queue.clear();
+      // Whether this call would actually do consolidation work decides both the
+      // duplicate-run guard and whether a claim is earned: a manual material
+      // fetch (no queue, no occurrence) serves anyone and records nothing.
+      const pending = await queue.size();
       // The Host reminder path never reported back, so the task record said
       // "never ran" while dreams ran nightly. The Host's delivery record is the
       // reliable source; a session snapshot inside a tool call does not
       // necessarily carry the event history.
       const occurrence = await scheduledOccurrence(ctx, exec);
+      if (pending > 0 || occurrence) {
+        const state = await tasks.load();
+        const at = state.lastExecutionAt ? Date.parse(state.lastExecutionAt) : Number.NaN;
+        const fresh = Number.isFinite(at) && Date.now() - at < DREAM_CLAIM_TTL_MS;
+        if (fresh && state.lastExecutor && state.lastExecutor !== caller) {
+          return `Consolidation already run by ${state.lastExecutor} at ${state.lastExecutionAt}; nothing to do.`;
+        }
+      }
+      // Delivering the material satisfies whatever queued a request: the
+      // caller now holds it. Leaving the queue untouched would nag forever.
+      const consumed = await queue.clear();
       if (occurrence) {
         const state = await tasks.load();
         const previous = state.lastRunAt ? Date.parse(state.lastRunAt) : 0;
@@ -1272,6 +1306,13 @@ function registerTools(ctx: HostContext, runtime: ToolsRuntime): () => void {
             from: new Date(occurrence),
           });
         }
+      }
+      // The claim is written after the bookkeeping it describes, and only by a
+      // call that did the work — otherwise a read-only fetch would silence the
+      // next agent who answers the nag.
+      if (consumed > 0 || occurrence) {
+        const state = await tasks.load();
+        await tasks.save({ ...state, lastExecutor: caller, lastExecutionAt: new Date().toISOString() });
       }
       const material = await buildDreamMaterial({
         store,
@@ -1356,6 +1397,11 @@ function registerTools(ctx: HostContext, runtime: ToolsRuntime): () => void {
         state.lastError ? `last error: ${state.lastError}` : null,
         `runs kept: ${state.runs.length}`,
         `pending requests: ${pending}`,
+        `executor: ${config.dreamExecutor || "any"}${
+          state.lastExecutionAt
+            ? ` · last executed by ${state.lastExecutor ?? "unknown"} at ${state.lastExecutionAt}`
+            : ""
+        }`,
         ours === null
           ? "host reminder: no schedule service (local timer drives it)"
           : ours.length

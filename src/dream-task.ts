@@ -34,6 +34,14 @@ export interface DreamState {
   lastError: string | null;
   nextRunAt: string | null;
   runs: DreamRun[];
+  /**
+   * Who last did consolidation work, and when. `memory_dream` stamps both only
+   * on a call that consumed queue work or executed a scheduled occurrence — a
+   * claim earned by work, not by asking for material. Other agents read it to
+   * stay out of a consolidation that just happened (see DREAM_CLAIM_TTL_MS).
+   */
+  lastExecutor?: string | null;
+  lastExecutionAt?: string | null;
   /** Written by bindHostReminder when the Host owns the delivery arm. */
   hostScheduleId?: string | null;
   hostSessionId?: string | null;
@@ -53,6 +61,8 @@ export function defaultState(input: Partial<DreamState> = {}): DreamState {
     lastError: null,
     nextRunAt: null,
     runs: [],
+    lastExecutor: null,
+    lastExecutionAt: null,
     ...input,
     // The task id is fixed; an input carrying a different id is ignored.
     id: TASK_ID,
