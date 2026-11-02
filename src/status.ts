@@ -16,6 +16,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { dateKey } from "./capture.ts";
+import type { ConflictEntry } from "./conflict.ts";
 import { parseFrontmatter } from "./markdown.ts";
 
 export type MemoryKind = "normal" | "notable" | "user-declared" | "conflict";
@@ -80,10 +81,18 @@ async function walk(dir: string): Promise<string[]> {
   return out;
 }
 
+/** What the route passes in from the workspace's conflict log. */
+export interface ConflictSummary {
+  total: number;
+  recent: ConflictEntry[];
+}
+
 export interface StatusInput {
   root: string;
   task?: Record<string, unknown> | null;
   days?: number;
+  /** Optional so older callers keep working; absent means "none recorded". */
+  conflicts?: ConflictSummary;
 }
 
 export interface StatusDay {
@@ -100,6 +109,8 @@ export interface StatusPayload {
   kinds: readonly MemoryKind[];
   days: StatusDay[];
   task: unknown;
+  /** Red cells need a trail: who recorded a contradiction, and against what. */
+  conflicts: ConflictSummary;
 }
 
 export async function buildStatus(input: StatusInput): Promise<StatusPayload> {
@@ -129,6 +140,7 @@ export async function buildStatus(input: StatusInput): Promise<StatusPayload> {
       kinds: entry.kinds,
     })),
     task: input.task ?? null,
+    conflicts: input.conflicts ?? { total: 0, recent: [] },
   };
 }
 

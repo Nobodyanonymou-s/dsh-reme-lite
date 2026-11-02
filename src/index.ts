@@ -22,8 +22,9 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { PathLocks } from "./atomic.ts";
-import { Capture, dateKey } from "./capture.ts";
+import { Capture, dateKey, excerpt } from "./capture.ts";
 import type { Turn } from "./capture.ts";
+import { ConflictLog } from "./conflict.ts";
 import { buildDreamMaterial, dreamPrompt } from "./dream.ts";
 import { DreamQueue } from "./dream-queue.ts";
 import { DEFAULT_CRON, DreamTaskStore } from "./dream-task.ts";
@@ -278,6 +279,8 @@ const SOURCE = "node-memory";
 const DREAM_MARKER = "[[node-memory:dream]]";
 const TICK_MS = 30_000;
 const MAX_EVIDENCE_CHARS = 4000;
+/** Width of the before/after excerpts a conflict line carries: enough to recognise the claim, not the whole node. */
+const CONFLICT_EXCERPT_CHARS = 200;
 
 export interface MemoryConfig {
   workspace: string;
@@ -439,6 +442,7 @@ interface Runtime {
   capture: Capture;
   tasks: DreamTaskStore;
   queue: DreamQueue;
+  conflicts: ConflictLog;
   config: MemoryConfig;
 }
 
@@ -469,13 +473,14 @@ function applyInner(ctx: HostContext, input: Partial<MemoryConfig> = {}): void {
   const capture = new Capture({ root: config.workspace, interval: config.captureInterval, locks });
   const tasks = new DreamTaskStore({ root: config.workspace });
   const queue = new DreamQueue({ root: config.workspace });
+  const conflicts = new ConflictLog({ root: config.workspace });
 
   let ready: Promise<unknown> = store.rebuild().catch((error: unknown) => {
     beacon(`rebuild-error ${error instanceof Error && error.stack ? error.stack : String(error)}`);
     ctx.logger?.warn?.(`[${SOURCE}] initial index failed: ${describe(error)}`);
   });
 
-  const runtime: Runtime = { ctx, store, capture, tasks, queue, config };
+  const runtime: Runtime = { ctx, store, capture, tasks, queue, conflicts, config };
 
   // Settings the user changed from the page outrank the mount config. Loading
   // is async, so the merge is a small promise the routes and tools await.
@@ -502,7 +507,7 @@ function applyInner(ctx: HostContext, input: Partial<MemoryConfig> = {}): void {
     };
   }, "nodeMemory.lifecycle()");
 
-  ctx.provide("nodeMemory", { store, capture, tasks, queue, config });
+  ctx.provide("nodeMemory", { store, capture, tasks, queue, conflicts, config });
 
   // The settings page is a browser and cannot read the workspace, so the Host
   // publishes aggregates over a same-origin route. Only counts leave the
@@ -740,6 +745,10 @@ function registerRoutes(
         lastRunAt: state.lastRunAt,
         lastStatus: state.lastStatus,
         runs: state.runs.length,
+      },
+      conflicts: {
+        total: await runtime.conflicts.total(),
+        recent: await runtime.conflicts.recent(),
       },
     });
     return {
@@ -983,7 +992,7 @@ async function tickFallback(runtime: Runtime): Promise<void> {
 }
 
 function registerTools(ctx: HostContext, runtime: ToolsRuntime): () => void {
-  const { store, capture, tasks, queue, config, refresh } = runtime;
+  const { store, capture, tasks, queue, conflicts, config, refresh } = runtime;
   DREAM_TITLE_CACHE = config.dreamTitle;
 
   const search = defineTool<{ query?: any; limit?: unknown; min_score?: unknown; scope?: any; room?: any }>({
@@ -1094,18 +1103,27 @@ function registerTools(ctx: HostContext, runtime: ToolsRuntime): () => void {
       // their own notes from tomorrow's session. An explicit scope wins.
       const privateDefault = stableIdentity(exec, config) && normalizedPath.startsWith("daily/");
       const isPrivate = args.scope === "private" || (args.scope !== "team" && privateDefault);
+      const writer = agentIdentity(exec, config);
       const stamp = stampScope({
-        agent: agentIdentity(exec, config),
+        agent: writer,
         session: sessionTag(exec),
         room: typeof args.room === "string" && args.room.trim() ? args.room.trim().slice(0, 64) : null,
         private: isPrivate,
       });
+      const kind = args.kind ? normalizeKind(args.kind) : undefined;
+      // A conflict has to be seen, not only colour-coded on a calendar nobody
+      // opens. The excerpt of what is being replaced is read inside the write's
+      // own per-path lock, so the log records what really was on disk rather
+      // than whatever a concurrent writer had left there a moment earlier.
+      const conflicting = kind === "conflict";
+      const excerptOf = (text: string): string => excerpt(text, CONFLICT_EXCERPT_CHARS);
+      let oldExcerpt: string | undefined;
       const rendered = renderNode(
         {
           name: args.name ? String(args.name) : undefined,
           description: args.description ? String(args.description) : undefined,
           updated: dateKey(new Date()),
-          kind: args.kind ? normalizeKind(args.kind) : undefined,
+          kind,
           agent: stamp.agent,
           session: stamp.session,
           room: stamp.room,
@@ -1114,12 +1132,37 @@ function registerTools(ctx: HostContext, runtime: ToolsRuntime): () => void {
         body,
       );
       try {
-        const result = await store.write({ relPath, content: rendered });
-        return [
+        const result = await store.write({
+          relPath,
+          content: rendered,
+          ...(conflicting
+            ? {
+                beforeWrite: (existing: string | null): void => {
+                  if (existing !== null) oldExcerpt = excerptOf(existing);
+                },
+              }
+            : {}),
+        });
+        if (conflicting) {
+          try {
+            await conflicts.record({
+              agent: writer,
+              relPath: result.relPath,
+              ...(oldExcerpt === undefined ? {} : { oldExcerpt }),
+              newExcerpt: excerptOf(body),
+            });
+          } catch (error) {
+            // The node is already written; a failed log line must not make the
+            // caller believe the write itself failed.
+            ctx.logger?.warn?.(`[${SOURCE}] conflict log failed: ${describe(error)}`);
+          }
+        }
+        const summary = [
           `Wrote ${result.relPath} (${result.bytes} bytes).`,
           isPrivate ? "Visibility: private to you." : "Visibility: team.",
           `Index: ${store.index.size} chunks from ${store.files.length} files.`,
         ].join(" ");
+        return conflicting ? `${summary}\nConflict recorded — see metadata/conflicts.jsonl` : summary;
       } catch (error) {
         return `memory_write failed: ${describe(error)}`;
       }

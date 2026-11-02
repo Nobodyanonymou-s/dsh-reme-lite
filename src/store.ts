@@ -338,14 +338,28 @@ export class MemoryStore {
   /**
    * Write a memory node: serialized per path, renamed into place atomically,
    * then reindexed incrementally — only this file's entries move.
+   *
+   * `beforeWrite` sees the text being replaced, inside the same per-path lock
+   * the replacement runs under. Callers that need the overwritten content
+   * (the conflict log takes an excerpt of it) use it instead of reading first
+   * on their own: a read outside the lock can race another writer and record
+   * an "old value" that was never on disk.
    */
-  async write(input: { relPath: string; content: string }): Promise<{ relPath: string; bytes: number }> {
+  async write(input: {
+    relPath: string;
+    content: string;
+    beforeWrite?: (existing: string | null) => Promise<void> | void;
+  }): Promise<{ relPath: string; bytes: number }> {
     const relPath = input.relPath.replace(/\\/g, "/").replace(/^\/+/, "");
     if (!/\.(md|markdown)$/i.test(relPath)) {
       throw new Error(`memory nodes must be .md: ${relPath}`);
     }
     const absolute = this.resolveInside(relPath);
     return this.#locks.run(absolute, async () => {
+      if (input.beforeWrite) {
+        const existing = await readFile(absolute, "utf8").catch(() => null);
+        await input.beforeWrite(existing);
+      }
       await mkdir(dirname(absolute), { recursive: true });
       await atomicWriteFile(absolute, input.content);
       await this.#serialize(() => this.#reindexPath(relPath, true));
