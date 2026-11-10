@@ -23,7 +23,6 @@ import { join } from "node:path";
 
 import { PathLocks } from "./atomic.ts";
 import { Capture, dateKey } from "./capture.ts";
-import type { Turn } from "./capture.ts";
 import { buildDreamMaterial, dreamPrompt } from "./dream.ts";
 import { DreamQueue } from "./dream-queue.ts";
 import { DEFAULT_CRON, DreamTaskStore } from "./dream-task.ts";
@@ -34,6 +33,11 @@ import { MemoryStore } from "./store.ts";
 import type { SearchHit } from "./store.ts";
 import { applySettings, loadSettings, saveSettings } from "./settings.ts";
 import { buildStatus, normalizeKind } from "./status.ts";
+import { SOURCE, TurnCapture, textOf, textOfRecord } from "./turns.ts";
+
+// The event → turn extraction lives beside the turn buffer that consumes it;
+// tests and tool authors keep importing it from the plugin entry.
+export { turnFromEvent } from "./turns.ts";
 
 /**
  * The Host surface this plugin actually touches, as a structural type.
@@ -273,7 +277,6 @@ export const inject = ["agents", "sessions", "tools"];
 //     name: dsh-reme-lite
 //     config: { dreamEnabled: true, dreamCron: "0 23 * * *" }
 
-const SOURCE = "node-memory";
 /** Marker inside the reminder prompt, so our rows are recognizable in the Host catalog. */
 const DREAM_MARKER = "[[node-memory:dream]]";
 const TICK_MS = 30_000;
@@ -467,6 +470,7 @@ function applyInner(ctx: HostContext, input: Partial<MemoryConfig> = {}): void {
   const locks = new PathLocks();
   const store = new MemoryStore({ root: config.workspace, maxChars: config.maxChars, locks });
   const capture = new Capture({ root: config.workspace, interval: config.captureInterval, locks });
+  const turns = new TurnCapture(capture);
   const tasks = new DreamTaskStore({ root: config.workspace });
   const queue = new DreamQueue({ root: config.workspace });
 
@@ -498,7 +502,9 @@ function applyInner(ctx: HostContext, input: Partial<MemoryConfig> = {}): void {
   ctx.effect(() => {
     void ready;
     return () => {
-      void capture.flushAll().catch(() => {});
+      // Through the turn buffer, so the reply staged for the turn in flight is
+      // settled before the projection drains underneath it.
+      void turns.flushAll().catch(() => {});
     };
   }, "nodeMemory.lifecycle()");
 
@@ -540,19 +546,25 @@ function applyInner(ctx: HostContext, input: Partial<MemoryConfig> = {}): void {
   ctx.on("session/event", ((session: SessionLike, event: unknown) => {
     if (!config.captureEnabled) return;
     if (config.rootAgentsOnly && session.header?.origin === "subagent") return;
-    const turn = turnFromEvent(event);
-    if (!turn) {
-      const type = textOfRecord(event)?.type;
-      if (env.debug && typeof type === "string" && type && !warned.has(type)) {
-        warned.add(type);
-        ctx.logger?.info?.(`[${SOURCE}] unrecognized session event: ${type}`);
-      }
-      return;
-    }
     const sessionId = session.header?.id ?? session.id ?? "unknown";
-    void capture.record(sessionId, turn).catch((error: unknown) => {
+    void turns.ingest(sessionId, event).catch((error: unknown) => {
       ctx.logger?.warn?.(`[${SOURCE}] capture failed: ${describe(error)}`);
     });
+    // Message and turn events are the capture path's whole diet; anything else
+    // is worth one debug line per type, and only when someone is debugging.
+    const type = textOfRecord(event)?.type;
+    if (
+      env.debug &&
+      typeof type === "string" &&
+      type &&
+      !warned.has(type) &&
+      !type.startsWith("user/") &&
+      !type.startsWith("assistant/") &&
+      !type.startsWith("turn/")
+    ) {
+      warned.add(type);
+      ctx.logger?.info?.(`[${SOURCE}] unrecognized session event: ${type}`);
+    }
   }) as (...args: never[]) => void);
 
   ctx.on("loader/volatile-update", (() => {
@@ -566,11 +578,6 @@ function applyInner(ctx: HostContext, input: Partial<MemoryConfig> = {}): void {
 }
 
 const env = { debug: Boolean(process.env.DSH_MEMORY_DEBUG) };
-
-/** Narrow an unknown value to a record without asserting anything about its shape. */
-function textOfRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
-}
 
 /**
  * Guidance, self-healing rebind, and queue drain — everything a fresh session
@@ -1291,54 +1298,6 @@ export function formatEvidence(hits: SearchHit[]): string {
     out += `${out ? "\n\n" : ""}${block}`;
   }
   return out || "No relevant memory found.";
-}
-
-/**
- * Extract a capturable turn from a session event, tolerating payload shapes.
- */
-export function turnFromEvent(event: unknown): Turn | null {
-  const record = textOfRecord(event);
-  const type = typeof record?.type === "string" ? record.type : "";
-  const role: Turn["role"] | null = type.startsWith("user/")
-    ? "user"
-    : type.startsWith("assistant/")
-      ? "assistant"
-      : null;
-  if (!role) return null;
-  const data = textOfRecord(record?.data) ?? {};
-  // `user/message` carries the message directly; `assistant/message` wraps it in
-  // `data.message` and puts the raw stream in `data.stream`. Getting this wrong
-  // silently captures nothing, which is worse than crashing.
-  const message = role === "assistant" ? (textOfRecord(data.message) ?? data) : data;
-  const messageSource = textOfRecord(message.source);
-  if (messageSource?.kind === SOURCE) return null;
-  if (messageSource?.plugin === SOURCE) return null;
-  const text = textOf(message);
-  if (!text) return null;
-  const eventTime = record?.time;
-  const messageTime = message.time;
-  const at =
-    typeof eventTime === "string"
-      ? eventTime
-      : typeof messageTime === "string"
-        ? messageTime
-        : new Date().toISOString();
-  return { role, text, at };
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function textOf(data: any): string {
-  if (typeof data?.text === "string") return data.text;
-  const content = data?.content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .filter((part) => part && (part.type === "text" || typeof part.text === "string"))
-      .map((part) => String(part.text ?? ""))
-      .join("")
-      .trim();
-  }
-  return "";
 }
 
 export function hasGuidance(session: unknown, pending: readonly unknown[] = []): boolean {

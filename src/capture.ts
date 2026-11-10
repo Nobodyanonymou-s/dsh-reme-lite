@@ -1,10 +1,12 @@
 /**
  * Turn capture: the durable half of memory that needs no model.
  *
- * Every completed turn is appended to `session/dialog/<session>.jsonl` first
- * (so nothing is lost on a crash), and the day's index page gets an excerpt
- * list inside a single auto-managed block. Human text outside that block is
- * never rewritten — the same boundary QwenPaw uses for `notes:auto`.
+ * Every turn is appended to `session/dialog/<session>.jsonl` first (so nothing
+ * is lost on a crash), and the day's index page gets an excerpt list inside a
+ * single auto-managed block. The two sinks diverge on purpose: the journal is
+ * the complete transcript, the page only what is worth re-reading. Human text
+ * outside that block is never rewritten — the same boundary QwenPaw uses for
+ * `notes:auto`.
  */
 
 import { createHash } from "node:crypto";
@@ -65,9 +67,12 @@ export class Capture {
   }
 
   /**
-   * Record one completed turn. Returns true when a durable write happened.
+   * Append one turn to the raw transcript. The transcript is the ground truth
+   * later passes reconcile against, so it takes everything a caller offers —
+   * including the mid-turn narration the daily page drops. Returns true when a
+   * line was written; a repeat of the session's previous turn writes nothing.
    */
-  async record(sessionId: string, turn: Turn): Promise<boolean> {
+  async journal(sessionId: string, turn: Turn): Promise<boolean> {
     const text = turn.text.trim();
     if (!text) return false;
     // Skip a turn identical to the previous one in the same session: retries
@@ -86,12 +91,32 @@ export class Capture {
       `${JSON.stringify({ session_id: sessionId, role: turn.role, at: turn.at, text })}\n`,
       "utf8",
     );
-    this.capturedTurns += 1;
+    return true;
+  }
 
+  /**
+   * Stage one turn for the daily page. Callers decide what deserves the page;
+   * `TurnCapture` sends only the user's words and each turn's final reply here.
+   */
+  async project(sessionId: string, turn: Turn): Promise<boolean> {
+    const text = turn.text.trim();
+    if (!text) return false;
+    this.capturedTurns += 1;
     const buffer = this.buffers.get(sessionId) ?? [];
     buffer.push({ ...turn, text });
     this.buffers.set(sessionId, buffer);
     if (buffer.length >= this.interval) await this.flush(sessionId);
+    return true;
+  }
+
+  /**
+   * Record one completed turn: journal it raw, then project it. Returns true
+   * when a durable write happened.
+   */
+  async record(sessionId: string, turn: Turn): Promise<boolean> {
+    const journaled = await this.journal(sessionId, turn);
+    if (!journaled) return false;
+    await this.project(sessionId, turn);
     return true;
   }
 
