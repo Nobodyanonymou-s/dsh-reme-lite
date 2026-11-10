@@ -104,8 +104,9 @@ export function candidatePaths(target: string, store: MemoryStore, exclude?: str
 /**
  * One line about a node: its description, else its frontmatter name, else the
  * file name. Whitespace collapses — the index page is one pointer per line.
+ * Shared with the session brief, so both name a node the same way.
  */
-function gistOf(file: IndexedFile): string {
+export function gistOf(file: IndexedFile): string {
   const raw =
     file.front.description ||
     file.front.name ||

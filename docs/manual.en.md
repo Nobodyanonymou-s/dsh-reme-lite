@@ -93,6 +93,8 @@ Two layers, one owner each:
 | `dreamEnabled` | `false` | the consolidation switch |
 | `dreamCron` | `0 23 * * *` | five-field cron |
 | `dreamTimeZone` | `Asia/Shanghai` | IANA zone; empty means host-local |
+| `briefEnabled` | `false` | session-brief switch: when on, a new session gets a five-section brief injected after the guidance (digest nodes only). Off by default — enabling it is an A/B experiment, not a default. |
+| `briefBudget` | `900` | total brief budget in characters (200–4000); over budget, rows drop whole by kind priority, section headings never do. |
 
 The mount `config:` block also carries two mount-only keys: `workspace` (the workspace path) and `agentName` (a fixed writer identity, for team mounts that distinguish members; empty derives it from the session).
 

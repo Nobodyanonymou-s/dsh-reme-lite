@@ -22,7 +22,8 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { PathLocks } from "./atomic.ts";
-import { Capture, dateKey } from "./capture.ts";
+import { buildBrief } from "./brief.ts";
+import { Capture, dateKey, shortHash } from "./capture.ts";
 import { buildDreamMaterial, dreamPrompt } from "./dream.ts";
 import { DreamQueue } from "./dream-queue.ts";
 import { DEFAULT_CRON, DreamTaskStore } from "./dream-task.ts";
@@ -147,6 +148,8 @@ export const Config = await (async () => {
       dreamCron: z.string().default("0 23 * * *"),
       dreamTimeZone: z.string().default(""),
       dreamTitle: z.string().default("记忆整理"),
+      briefEnabled: z.boolean().default(false),
+      briefBudget: z.number().step(1).min(200).max(4000).default(900),
     });
   } catch {
     return undefined;
@@ -298,6 +301,10 @@ export interface MemoryConfig {
   dreamCron: string;
   dreamTimeZone: string | null;
   dreamTitle: string;
+  /** Opt-in session-start brief; off is the default and on is an experiment. */
+  briefEnabled: boolean;
+  /** Character budget for the whole brief, title and headings included. */
+  briefBudget: number;
 }
 
 /**
@@ -383,6 +390,8 @@ export function resolveConfig(input: Partial<MemoryConfig> = {}, env: NodeJS.Pro
       0,
       120,
     ),
+    briefEnabled: input.briefEnabled ?? false,
+    briefBudget: clamp(input.briefBudget ?? 900, 200, 4000, 900),
   };
 }
 
@@ -444,6 +453,10 @@ interface Runtime {
   tasks: DreamTaskStore;
   queue: DreamQueue;
   config: MemoryConfig;
+  /** Brief text hash per session — dedupes a Host that replays `agent/created`. */
+  briefSeen: Map<string, string>;
+  /** The current index promise, read at call time; a captured one goes stale. */
+  index: () => Promise<unknown>;
 }
 
 type ToolsRuntime = Runtime & { refresh: () => Promise<void> };
@@ -480,7 +493,16 @@ function applyInner(ctx: HostContext, input: Partial<MemoryConfig> = {}): void {
     ctx.logger?.warn?.(`[${SOURCE}] initial index failed: ${describe(error)}`);
   });
 
-  const runtime: Runtime = { ctx, store, capture, tasks, queue, config };
+  const runtime: Runtime = {
+    ctx,
+    store,
+    capture,
+    tasks,
+    queue,
+    config,
+    briefSeen: new Map<string, string>(),
+    index: () => ready,
+  };
 
   // Settings the user changed from the page outrank the mount config. Loading
   // is async, so the merge is a small promise the routes and tools await.
@@ -585,7 +607,7 @@ const env = { debug: Boolean(process.env.DSH_MEMORY_DEBUG) };
  * needs from the memory system.
  */
 async function onSessionStart(runtime: Runtime, agent: AgentLike): Promise<void> {
-  const { ctx, config, tasks, queue } = runtime;
+  const { ctx, config, store, tasks, queue, briefSeen } = runtime;
 
   if (agent.inject) {
     if (!hasGuidance(agent.session, agent.inbox?.nextStep)) {
@@ -595,6 +617,26 @@ async function onSessionStart(runtime: Runtime, agent: AgentLike): Promise<void>
           source: { kind: SOURCE, form: "instructions" },
         }),
       );
+    }
+    // The brief is opt-in and content-addressed per session: however often the
+    // Host replays `agent/created`, the same text lands once. It shares the
+    // guidance's source form but not its dedup — hasGuidance answers "has the
+    // session seen our instructions", which must not swallow a brief the
+    // process has not built yet.
+    if (config.briefEnabled) {
+      await runtime.index(); // the brief reads the index, so it must be built
+      const sessionId = agent.session?.header?.id ?? agent.session?.id ?? "unknown";
+      const brief = buildBrief(store, { language: config.language, budget: config.briefBudget });
+      const hash = shortHash(brief);
+      if (briefSeen.get(sessionId) !== hash) {
+        briefSeen.set(sessionId, hash);
+        agent.inject(
+          createUserMessage({
+            content: [{ type: "text", text: brief }],
+            source: { kind: SOURCE, form: "instructions" },
+          }),
+        );
+      }
     }
     const pending = await queue.size();
     if (pending > 0) {
@@ -760,6 +802,8 @@ function registerRoutes(
         dreamEnabled: runtime.config.dreamEnabled,
         dreamCron: runtime.config.dreamCron,
         dreamTimeZone: runtime.config.dreamTimeZone,
+        briefEnabled: runtime.config.briefEnabled,
+        briefBudget: runtime.config.briefBudget,
       },
     };
   };

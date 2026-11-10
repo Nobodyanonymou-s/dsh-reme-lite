@@ -36,6 +36,7 @@ interface BundleExports {
   Legend: (props: Record<string, any>) => Element;
   heatmapColumns: (days: any[], weeks: number, today: Date) => any[][];
   healthLine: (digest: unknown, t: (key: string) => string) => string | null;
+  clampBudget: (value: unknown, fallback: number) => number;
   readConfig: (ctx: any) => { values: unknown; error?: string };
   formActions: (ctx: any) => unknown;
   COLORS: Record<string, string>;
@@ -329,6 +330,79 @@ describe("the compiled client bundle", () => {
       assert.equal(first.url, "/node-memory/settings");
       assert.deepEqual(first.body, { language: "en" });
       assert.deepEqual(second.body, { dreamEnabled: true });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("clampBudget pins the brief budget to whole characters within range", async () => {
+    const row = await loadBundle();
+    const exports = instantiate(row);
+    assert.equal(exports.clampBudget("50", 900), 200, "keystrokes below the floor clamp up");
+    assert.equal(exports.clampBudget("9999", 900), 4000, "keystrokes above the ceiling clamp down");
+    assert.equal(exports.clampBudget("1200.6", 900), 1201, "a fractional value rounds to whole characters");
+    assert.equal(exports.clampBudget("abc", 900), 900, "anything unreadable falls back");
+  });
+
+  it("the brief row renders its switch and budget, and posts clamped values", async () => {
+    const row = await loadBundle();
+    const exports = instantiate(row);
+    const { ctx, registrations, dicts } = makeCtx(undefined);
+    exports.apply(ctx);
+    const zh = dicts["node-memory"].zh;
+
+    const posts: Array<{ url: unknown; body: any }> = [];
+    vi.stubGlobal("fetch", async (url: unknown, init: any) => {
+      posts.push({ url, body: init && init.body ? JSON.parse(init.body) : null });
+      // The write path adopts the returned status, so the echo carries the
+      // brief settings exactly as the Host now holds them.
+      return {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          status: {
+            total: 1,
+            workspace: "C:/mem",
+            days: [],
+            settings: { language: "zh", dreamEnabled: false, briefEnabled: true, briefBudget: 200 },
+            task: null,
+          },
+        }),
+      };
+    });
+
+    try {
+      const registration = sectionRegistration(registrations);
+      const props = { t: (key: string) => zh[key] ?? key, ...registration.options.inject() };
+      const tree = registration.component(props);
+
+      const checkboxes: any[] = [];
+      let budget: any = null;
+      const walk = (node: any): void => {
+        if (!node || typeof node !== "object") return;
+        if (node.type === "input" && node.props.type === "checkbox") checkboxes.push(node);
+        if (node.type === "input" && node.props.type === "number") budget = node;
+        for (const child of node.children || []) walk(child);
+      };
+      walk(tree);
+
+      assert.equal(checkboxes.length, 2, "the consolidation switch and the brief switch");
+      assert.ok(budget, "the brief budget is a number input");
+      assert.equal(checkboxes[1].props.checked, false, "off until the Host reports otherwise");
+      assert.equal(budget.props.value, "", "no status yet: the budget renders empty, it does not guess");
+      const text = collectText(tree).join(" ");
+      assert.ok(text.includes("会话简报"), "the brief switch is labelled in the shipped wording");
+
+      checkboxes[1].props.onChange({ target: { checked: true } });
+      budget.props.onChange({ target: { value: "50" } });
+      budget.props.onChange({ target: { value: "9999" } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const bodies = posts.map((post) => post.body);
+      assert.ok(posts.every((post) => post.url === "/node-memory/settings"), "writes go to the settings route");
+      assert.deepEqual(bodies[0], { briefEnabled: true }, "the brief switch posts");
+      assert.deepEqual(bodies[1], { briefBudget: 200 }, "the budget clamps before POST");
+      assert.deepEqual(bodies[2], { briefBudget: 4000 });
     } finally {
       vi.unstubAllGlobals();
     }

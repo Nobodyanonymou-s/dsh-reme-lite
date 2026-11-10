@@ -47,6 +47,11 @@ const DICT = {
     langReadOnly: "语言在「插件」页的配置卡里修改（此处只读）。",
     lastRun: "上次整理",
     never: "从未",
+    // Session brief (opt-in): switch, and the budget input beside it.
+    briefOn: "会话简报：开",
+    briefOff: "会话简报：关",
+    briefHint: "会话简报：读到状态前开关不可用（默认关）。",
+    briefBudgetUnit: "字符",
     // Knowledge-base health line; the templates own the word order.
     kbHead: "知识库：{n} 节点",
     kbChars: "{c} 字符",
@@ -76,6 +81,11 @@ const DICT = {
     langReadOnly: "Change the language in the Plugins config card (read-only here).",
     lastRun: "last consolidation",
     never: "never",
+    // Session brief (opt-in): switch, and the budget input beside it.
+    briefOn: "Session brief: on",
+    briefOff: "Session brief: off",
+    briefHint: "Session brief: the switch is unavailable until status loads (off by default).",
+    briefBudgetUnit: "chars",
     // Knowledge-base health line; the templates own the word order.
     kbHead: "Knowledge base: {n} nodes",
     kbChars: "{c} chars",
@@ -84,6 +94,18 @@ const DICT = {
     kbNearDuplicates: "{n} near-duplicates",
   },
 };
+
+/** Brief budget bounds; the Host clamps the same range server-side. */
+export const BRIEF_BUDGET_MIN = 200;
+export const BRIEF_BUDGET_MAX = 4000;
+const BRIEF_BUDGET_DEFAULT = 900;
+
+/** Whole characters within [min, max]; anything unreadable falls back. Pure, so tests pin it. */
+export function clampBudget(value: unknown, fallback: number): number {
+  const parsed = Math.round(Number(value));
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(BRIEF_BUDGET_MAX, Math.max(BRIEF_BUDGET_MIN, parsed));
+}
 
 const style: Record<string, React.CSSProperties> = {
   root: { display: "flex", flexDirection: "column", gap: "14px", padding: "4px 0" },
@@ -96,6 +118,7 @@ const style: Record<string, React.CSSProperties> = {
   swatch: { width: "10px", height: "10px", borderRadius: "2px", display: "inline-block", marginRight: "5px" },
   key: { opacity: 0.65 },
   select: { fontSize: "12px", padding: "2px 6px", borderRadius: "4px", background: "transparent", color: "inherit", border: "1px solid rgba(127,127,127,0.35)" },
+  number: { fontSize: "12px", padding: "2px 6px", width: "72px", borderRadius: "4px", background: "transparent", color: "inherit", border: "1px solid rgba(127,127,127,0.35)" },
 };
 
 function dayKey(date: string): string {
@@ -298,6 +321,8 @@ export function MemorySection(props: { t: Translate }) {
   const task = status && status.task ? status.task : null;
   const language = (settings && settings.language) || "auto";
   const enabled = settings && typeof settings.dreamEnabled === "boolean" ? settings.dreamEnabled : null;
+  const briefEnabled = settings && typeof settings.briefEnabled === "boolean" ? settings.briefEnabled : null;
+  const briefBudget = settings && Number.isFinite(Number(settings.briefBudget)) ? Number(settings.briefBudget) : null;
   const children: React.ReactNode[] = [];
 
   children.push(
@@ -332,6 +357,39 @@ export function MemorySection(props: { t: Translate }) {
         onChange: (event: React.ChangeEvent<HTMLInputElement>) => update({ dreamEnabled: event.target.checked }),
       }),
       React.createElement("span", null, enabled === null ? t("switchHint") : enabled ? t("switchOn") : t("switchOff")),
+    ),
+  );
+
+  // One row owns both brief settings: the opt-in switch and the character
+  // budget it injects with. Off is the default — the row only mirrors what the
+  // Host reports, and the budget clamps to the same range the Host enforces.
+  children.push(
+    React.createElement(
+      "label",
+      { key: "brief", style: { ...style.row, cursor: "pointer" } },
+      React.createElement("input", {
+        type: "checkbox",
+        checked: briefEnabled === true,
+        disabled: busy || briefEnabled === null,
+        onChange: (event: React.ChangeEvent<HTMLInputElement>) => update({ briefEnabled: event.target.checked }),
+      }),
+      React.createElement(
+        "span",
+        null,
+        briefEnabled === null ? t("briefHint") : briefEnabled ? t("briefOn") : t("briefOff"),
+      ),
+      React.createElement("input", {
+        type: "number",
+        min: BRIEF_BUDGET_MIN,
+        max: BRIEF_BUDGET_MAX,
+        step: 1,
+        value: briefBudget === null ? "" : briefBudget,
+        disabled: busy || briefBudget === null,
+        style: style.number,
+        onChange: (event: React.ChangeEvent<HTMLInputElement>) =>
+          update({ briefBudget: clampBudget(event.target.value, briefBudget ?? BRIEF_BUDGET_DEFAULT) }),
+      }),
+      React.createElement("span", { style: style.key }, t("briefBudgetUnit")),
     ),
   );
 

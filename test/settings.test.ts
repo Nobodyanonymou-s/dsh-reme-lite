@@ -77,3 +77,34 @@ it("auto is a valid stored value, not a resolved language", () => {
   const merged = applySettings({ language: "zh" }, { language: "auto" });
   assert.equal(merged.language, "zh");
 });
+
+it("brief settings validate like the dream switch: exact or rejected", () => {
+  const { settings, rejected } = validateSettings({ briefEnabled: true, briefBudget: 1200 });
+  assert.deepEqual(settings, { briefEnabled: true, briefBudget: 1200 });
+  assert.deepEqual(rejected, []);
+
+  // A non-boolean switch or a fractional/out-of-range budget is a typo, and a
+  // typo must be reported rather than silently fixed.
+  const bad = validateSettings({ briefEnabled: "on", briefBudget: 1.5 });
+  assert.deepEqual(bad.settings, {});
+  assert.deepEqual(bad.rejected.sort(), ["briefBudget", "briefEnabled"]);
+
+  assert.deepEqual(validateSettings({ briefBudget: 100 }).rejected, ["briefBudget"], "below the floor");
+  assert.deepEqual(validateSettings({ briefBudget: 4001 }).rejected, ["briefBudget"], "above the ceiling");
+  assert.deepEqual(validateSettings({ briefBudget: "900" }).rejected, ["briefBudget"], "a string is not a number");
+  assert.deepEqual(validateSettings({ briefBudget: 200 }).settings, { briefBudget: 200 }, "the floor itself is valid");
+  assert.deepEqual(validateSettings({ briefBudget: 4000 }).settings, { briefBudget: 4000 }, "the ceiling itself is valid");
+});
+
+it("brief settings override the mount config key by key", () => {
+  const base = { language: "zh", dreamEnabled: false, briefEnabled: false, briefBudget: 900, workspace: "C:/mem" };
+  const merged = applySettings(base, { briefEnabled: true, briefBudget: 2500 });
+  assert.equal(merged.briefEnabled, true);
+  assert.equal(merged.briefBudget, 2500);
+  assert.equal(merged.workspace, "C:/mem", "untouched keys survive");
+  assert.equal(base.briefEnabled, false, "the input is not mutated");
+  // A partial brief patch leaves the other brief key at its mount value.
+  const partial = applySettings(base, { briefEnabled: true });
+  assert.equal(partial.briefEnabled, true);
+  assert.equal(partial.briefBudget, 900);
+});

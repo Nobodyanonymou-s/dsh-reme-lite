@@ -11,15 +11,27 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 /** Keys the UI may write. Anything else in the file is ignored. */
-export const MUTABLE_KEYS: readonly string[] = ["language", "dreamEnabled", "dreamCron", "dreamTimeZone"];
+export const MUTABLE_KEYS: readonly string[] = [
+  "language",
+  "dreamEnabled",
+  "dreamCron",
+  "dreamTimeZone",
+  "briefEnabled",
+  "briefBudget",
+];
 
 const LANGUAGES: readonly string[] = ["auto", "zh", "en"];
+/** Same bounds resolveConfig clamps the mount config to; a page write must be exact. */
+const BRIEF_BUDGET_MIN = 200;
+const BRIEF_BUDGET_MAX = 4000;
 
 export interface Settings {
   language?: string;
   dreamEnabled?: boolean;
   dreamCron?: string;
   dreamTimeZone?: string;
+  briefEnabled?: boolean;
+  briefBudget?: number;
 }
 
 /** The config shape applySettings can override; keeps the generic return type honest. */
@@ -28,6 +40,8 @@ export interface SettingsTarget {
   dreamEnabled?: boolean;
   dreamCron?: string | null;
   dreamTimeZone?: string | null;
+  briefEnabled?: boolean;
+  briefBudget?: number;
 }
 
 export function settingsPath(root: string): string {
@@ -76,6 +90,27 @@ export function validateSettings(input: unknown): { settings: Settings; rejected
     if (key === "dreamTimeZone") {
       if (typeof value === "string") settings.dreamTimeZone = value.trim();
       else rejected.push(key);
+      continue;
+    }
+    if (key === "briefEnabled") {
+      if (typeof value === "boolean") settings.briefEnabled = value;
+      else rejected.push(key);
+      continue;
+    }
+    if (key === "briefBudget") {
+      // Whole characters within the brief's hard range. resolveConfig clamps a
+      // hand-written mount config, but a page write must be exact — a typo is
+      // reported, never silently fixed.
+      if (
+        typeof value === "number" &&
+        Number.isInteger(value) &&
+        value >= BRIEF_BUDGET_MIN &&
+        value <= BRIEF_BUDGET_MAX
+      ) {
+        settings.briefBudget = value;
+      } else {
+        rejected.push(key);
+      }
     }
   }
   return { settings, rejected };
@@ -109,5 +144,7 @@ export function applySettings<T extends SettingsTarget>(config: T, settings: Set
   if (typeof settings.dreamEnabled === "boolean") next.dreamEnabled = settings.dreamEnabled;
   if (settings.dreamCron) next.dreamCron = settings.dreamCron;
   if (settings.dreamTimeZone !== undefined) next.dreamTimeZone = settings.dreamTimeZone || null;
+  if (typeof settings.briefEnabled === "boolean") next.briefEnabled = settings.briefEnabled;
+  if (settings.briefBudget !== undefined) next.briefBudget = settings.briefBudget;
   return next;
 }

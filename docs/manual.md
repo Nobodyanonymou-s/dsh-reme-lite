@@ -93,6 +93,8 @@
 | `dreamEnabled` | `false` | 定时整理开关 |
 | `dreamCron` | `0 23 * * *` | 五段 cron |
 | `dreamTimeZone` | `Asia/Shanghai` | IANA 时区；留空表示宿主本地时间 |
+| `briefEnabled` | `false` | 会话简报开关：开启后新会话在守则之后注入一段五段式简报（只收 `digest/` 节点）。默认关——开它是一次 A/B 实验，不是默认体验。 |
+| `briefBudget` | `900` | 简报总长预算（字符，200–4000）；超预算时按 kind 优先级整行丢弃，段标题永不丢。 |
 
 挂载 `config:` 块还有两个只在挂载层生效的键：`workspace`（工作区路径）与 `agentName`（固定写入者身份，团队挂载用它区分成员；留空则按会话推导）。
 
