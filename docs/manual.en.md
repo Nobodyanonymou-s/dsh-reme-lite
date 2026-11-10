@@ -50,6 +50,17 @@ Every non-green node ends with a one-line justification, so a colour stays audit
 > purple: user said on 10-25, "we ship on Fridays from now on"
 ```
 
+## Knowledge-base health, and what the numbers mean
+
+The settings page shows one health line above the heatmap: `Knowledge base: 34 nodes / 128k chars · 3 dangling · 5 orphans · 2 near-duplicates · last consolidation 11-08`. The numbers come from the `digest` segment of `/node-memory/status.json` — aggregates only, never memory text. One sentence each:
+
+- **dangling** = a written `[[target]]` resolves to no node (neither a file name nor a frontmatter `name` matches it).
+- **orphan** = a digest node with no inbound link (links from daily pages count as inbound — it is an orphan only when nothing points at it).
+- **near-duplicate** = two digest nodes whose token bags score Jaccard ≥ 0.8 (Chinese compares by character bigram). Reported only, never merged automatically; merging is the consolidator's call.
+- **the index page is counted separately**: `digest/index.md` is generated, so it stays out of nodes, chars, the heatmap, and the total; its size ships on its own as `indexPage.chars`.
+
+These numbers are a **warning**, not a trigger: however many dangling links or duplicates pile up, no consolidation starts on its own.
+
 ## Teams and multiple agents (0.3.0)
 
 One workspace can be shared by several agents. The problem being solved is the one the plan worked backwards from: **one agent's tentative judgment must not be read by another agent as an established fact.**

@@ -47,6 +47,12 @@ const DICT = {
     langReadOnly: "语言在「插件」页的配置卡里修改（此处只读）。",
     lastRun: "上次整理",
     never: "从未",
+    // Knowledge-base health line; the templates own the word order.
+    kbHead: "知识库：{n} 节点",
+    kbChars: "{c} 字符",
+    kbDangling: "断链 {n}",
+    kbOrphans: "孤儿 {n}",
+    kbNearDuplicates: "疑似重复 {n}",
   },
   en: {
     title: "Memory",
@@ -70,6 +76,12 @@ const DICT = {
     langReadOnly: "Change the language in the Plugins config card (read-only here).",
     lastRun: "last consolidation",
     never: "never",
+    // Knowledge-base health line; the templates own the word order.
+    kbHead: "Knowledge base: {n} nodes",
+    kbChars: "{c} chars",
+    kbDangling: "{n} dangling",
+    kbOrphans: "{n} orphans",
+    kbNearDuplicates: "{n} near-duplicates",
   },
 };
 
@@ -138,6 +150,57 @@ export function heatmapColumns(days: DayEntry[] | null | undefined, weeks: numbe
 }
 
 type Translate = (k: string) => string;
+
+/**
+ * DICT templates own the word order, so a number is spliced in by placeholder
+ * instead of concatenated by the caller.
+ */
+function fill(template: string, values: Record<string, string>): string {
+  return template.replace(/\{(\w+)\}/g, (placeholder: string) => {
+    const value = values[placeholder.slice(1, -1)];
+    return value === undefined ? placeholder : value;
+  });
+}
+
+/** Body size for the health line: 128400 reads as "128k", 940 stays itself. */
+function charsText(chars: number): string {
+  return chars >= 1000 ? `${Math.round(chars / 1000)}k` : String(chars);
+}
+
+/**
+ * One line of knowledge-base health, e.g.
+ * `知识库：34 节点 / 128k 字符 · 断链 3 · 孤儿 5 · 疑似重复 2 · 上次整理 11-08`.
+ * Pure, so it is testable against the built bundle. An old Host that serves no
+ * `digest` segment (or one without `nodes`) yields null and the line is simply
+ * not rendered; a metric the Host could not compute is skipped rather than
+ * shown as zero — absent and zero mean different things.
+ */
+export function healthLine(digest: unknown, t: Translate): string | null {
+  if (!digest || typeof digest !== "object") return null;
+  const segment = digest as Record<string, unknown>;
+  const count = (value: unknown): number | null =>
+    typeof value === "number" && Number.isFinite(value) ? value : null;
+  const nodes = count(segment.nodes);
+  if (nodes === null) return null;
+
+  let head = fill(t("kbHead"), { n: String(nodes) });
+  const chars = count(segment.chars);
+  if (chars !== null) head += ` / ${fill(t("kbChars"), { c: charsText(chars) })}`;
+
+  const parts: string[] = [head];
+  const metric = (value: unknown, key: string): void => {
+    const n = count(value);
+    if (n !== null) parts.push(fill(t(key), { n: String(n) }));
+  };
+  metric(segment.danglingLinks, "kbDangling");
+  metric(segment.orphanNodes, "kbOrphans");
+  metric(segment.nearDuplicates, "kbNearDuplicates");
+  const lastDreamAt = typeof segment.lastDreamAt === "string" && segment.lastDreamAt
+    ? String(segment.lastDreamAt).slice(5, 10)
+    : null;
+  if (lastDreamAt) parts.push(`${t("lastRun")} ${lastDreamAt}`);
+  return parts.join(" · ");
+}
 
 export function Heatmap(props: { columns: HeatCell[][]; t: Translate }) {
   const t = props.t;
@@ -297,6 +360,10 @@ export function MemorySection(props: { t: Translate }) {
         `${t("workspace")}: ${status.workspace}`,
       ),
     );
+    // Health sits above the heatmap: bloat and broken links are the "why" the
+    // calendar cannot show. An old Host without a digest segment adds no row.
+    const health = healthLine(status.digest, t);
+    if (health) children.push(React.createElement("p", { key: "health", style: style.hint }, health));
     children.push(
       React.createElement(Heatmap, { key: "heat", columns: heatmapColumns(status.days, WEEKS, new Date()), t }),
     );

@@ -10,13 +10,19 @@
  *   notable       blue    the agent judged it significant
  *   user-declared purple  the user said it was important
  *   conflict      red     contradicts something already recorded
+ *
+ * Alongside the heatmap the payload carries a `digest` segment: knowledge-base
+ * health as aggregates only (size, dangling links, orphans, near-duplicates),
+ * so a summary layer quietly outgrowing the corpus it summarizes is visible.
  */
 
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { dateKey } from "./capture.ts";
+import { buildLinkGraph, digestNodes, INDEX_PAGE_PATH, nearDuplicates } from "./links.ts";
 import { parseFrontmatter } from "./markdown.ts";
+import type { MemoryStore } from "./store.ts";
 
 export type MemoryKind = "normal" | "notable" | "user-declared" | "conflict";
 
@@ -33,6 +39,8 @@ interface CollectedFile {
   relPath: string;
   kind: MemoryKind;
   date: string;
+  /** Whole file length in characters — the digest bloat gauge, not bytes. */
+  chars: number;
 }
 
 async function collect(root: string): Promise<CollectedFile[]> {
@@ -40,6 +48,9 @@ async function collect(root: string): Promise<CollectedFile[]> {
   for (const dir of ["daily", "digest"]) {
     for (const absolute of await walk(join(root, dir))) {
       const relPath = absolute.slice(root.length + 1).split("\\").join("/");
+      // The generated pointer page is not a memory entry: counting it would
+      // inflate both the heatmap and the total. It is reported on its own.
+      if (relPath === INDEX_PAGE_PATH) continue;
       let text;
       try {
         text = await readFile(absolute, "utf8");
@@ -58,7 +69,7 @@ async function collect(root: string): Promise<CollectedFile[]> {
         if (info === null) continue;
         date = dateKey(info.mtime);
       }
-      out.push({ relPath, kind: normalizeKind(data.kind), date });
+      out.push({ relPath, kind: normalizeKind(data.kind), date, chars: text.length });
     }
   }
   return out;
@@ -84,6 +95,13 @@ export interface StatusInput {
   root: string;
   task?: Record<string, unknown> | null;
   days?: number;
+  /**
+   * The live index, when the caller has one: the graph-derived health numbers
+   * (dangling links, orphans, near-duplicates) are only computed against it.
+   * Without it those three stay `null` — the fields always exist, so an old
+   * client cannot trip over a missing key.
+   */
+  store?: MemoryStore;
 }
 
 export interface StatusDay {
@@ -93,6 +111,22 @@ export interface StatusDay {
   kinds: Record<string, number>;
 }
 
+/**
+ * Knowledge-base health, aggregates only — the wiki-bloat warning Anthropic
+ * ran into (a summary layer grown past the corpus it summarizes) must be
+ * visible before it is acted on. No node text ever travels in this segment.
+ */
+export interface DigestStatus {
+  nodes: number;
+  chars: number;
+  byDir: Record<string, number>;
+  indexPage: { path: string; chars: number } | null;
+  danglingLinks: number | null;
+  orphanNodes: number | null;
+  nearDuplicates: number | null;
+  lastDreamAt: string | null;
+}
+
 export interface StatusPayload {
   generatedAt: string;
   workspace: string;
@@ -100,11 +134,65 @@ export interface StatusPayload {
   kinds: readonly MemoryKind[];
   days: StatusDay[];
   task: unknown;
+  digest: DigestStatus;
+}
+
+/** Second-level directory of a digest path; loose files at the root are `misc`. */
+function digestDir(relPath: string): string {
+  const segment = relPath.split("/");
+  return segment.length >= 3 ? segment[1]! : "misc";
+}
+
+/** The generated pointer page, reported separately because collect skips it. */
+async function indexPageStatus(root: string): Promise<DigestStatus["indexPage"]> {
+  let text: string;
+  try {
+    text = await readFile(join(root, INDEX_PAGE_PATH), "utf8");
+  } catch {
+    return null;
+  }
+  return { path: INDEX_PAGE_PATH, chars: text.length };
+}
+
+/**
+ * Digest segment: size and directory spread come from the walk (always
+ * available), the graph-derived numbers from the caller's store. The three
+ * graph numbers are warnings for whoever consolidates next — never a trigger
+ * that runs a dream on its own.
+ */
+async function digestStatus(
+  collected: CollectedFile[],
+  root: string,
+  store?: MemoryStore,
+  task?: Record<string, unknown> | null,
+): Promise<DigestStatus> {
+  const nodes = collected.filter((file) => file.relPath.startsWith("digest/"));
+  const byDir: Record<string, number> = {};
+  for (const file of nodes) {
+    const dir = digestDir(file.relPath);
+    byDir[dir] = (byDir[dir] ?? 0) + 1;
+  }
+  const graph = store ? buildLinkGraph(store) : null;
+  const lastRunAt = task?.lastRunAt;
+  return {
+    nodes: nodes.length,
+    chars: nodes.reduce((sum, file) => sum + file.chars, 0),
+    byDir,
+    indexPage: await indexPageStatus(root),
+    danglingLinks: graph ? graph.dangling.length : null,
+    orphanNodes:
+      graph && store
+        ? digestNodes(store).filter((file) => (graph.nodes[file.relPath]?.in.length ?? 0) === 0).length
+        : null,
+    nearDuplicates: store ? nearDuplicates(store).length : null,
+    lastDreamAt: typeof lastRunAt === "string" && lastRunAt ? lastRunAt : null,
+  };
 }
 
 export async function buildStatus(input: StatusInput): Promise<StatusPayload> {
   const days = input.days ?? 180;
   const files = await collect(input.root);
+  const digest = await digestStatus(files, input.root, input.store, input.task);
   const byDate = new Map<string, { total: number; kind: MemoryKind; kinds: Record<string, number> }>();
   for (const file of files) {
     const entry = byDate.get(file.date) ?? { total: 0, kind: "normal", kinds: {} };
@@ -129,6 +217,7 @@ export async function buildStatus(input: StatusInput): Promise<StatusPayload> {
       kinds: entry.kinds,
     })),
     task: input.task ?? null,
+    digest,
   };
 }
 

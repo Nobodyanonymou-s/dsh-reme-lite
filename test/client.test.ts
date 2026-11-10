@@ -35,6 +35,7 @@ interface BundleExports {
   Heatmap: (props: Record<string, any>) => Element;
   Legend: (props: Record<string, any>) => Element;
   heatmapColumns: (days: any[], weeks: number, today: Date) => any[][];
+  healthLine: (digest: unknown, t: (key: string) => string) => string | null;
   readConfig: (ctx: any) => { values: unknown; error?: string };
   formActions: (ctx: any) => unknown;
   COLORS: Record<string, string>;
@@ -90,8 +91,16 @@ function fakeReact() {
   };
 }
 
-function makeCtx(configForms: unknown): { ctx: any; registrations: Registration[] } {
+function makeCtx(configForms: unknown): {
+  ctx: any;
+  registrations: Registration[];
+  dicts: Record<string, any>;
+} {
   const registrations: Registration[] = [];
+  // Locale dictionaries land here through apply(), so tests can assert on the
+  // shipped wording without reaching into the bundle's private scope.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const dicts: Record<string, any> = {};
   const ctx: any = {
     effect: (fn: () => void) => {
       fn();
@@ -99,7 +108,10 @@ function makeCtx(configForms: unknown): { ctx: any; registrations: Registration[
     },
     locale: {
       bind: () => (key: string) => key,
-      register: () => () => {},
+      register: (ns: string, dict: Record<string, string>) => {
+        dicts[ns] = dict;
+        return () => {};
+      },
     },
     slots: {
       inject: (_name: string, fn: () => unknown) => fn(),
@@ -110,7 +122,7 @@ function makeCtx(configForms: unknown): { ctx: any; registrations: Registration[
     },
     configForms,
   };
-  return { ctx, registrations };
+  return { ctx, registrations, dicts };
 }
 
 /** The section registration is what every interaction test starts from. */
@@ -348,5 +360,85 @@ describe("the compiled client bundle", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  describe("healthLine", () => {
+    // A translator over placeholder templates, the shape the real DICT has:
+    // the dict owns word order, the function only splices numbers in.
+    const templates: Record<string, string> = {
+      kbHead: "{n} nodes",
+      kbChars: "{c} chars",
+      kbDangling: "{n} dangling",
+      kbOrphans: "{n} orphans",
+      kbNearDuplicates: "{n} near-duplicates",
+      lastRun: "last consolidation",
+    };
+    const t = (key: string) => templates[key] ?? key;
+    const identity = (key: string) => key;
+    const full = {
+      nodes: 34,
+      chars: 128400,
+      byDir: { wiki: 18, personal: 8 },
+      indexPage: { path: "digest/index.md", chars: 2400 },
+      danglingLinks: 3,
+      orphanNodes: 5,
+      nearDuplicates: 2,
+      lastDreamAt: "2026-11-08T15:00:00.000Z",
+    };
+
+    it("the line carries the node count, the k-rounded size, and every metric", async () => {
+      const row = await loadBundle();
+      const line = instantiate(row).healthLine(full, t);
+      assert.ok(line, "a full digest segment yields a line");
+      assert.ok(line.includes("34"), "node count");
+      assert.ok(line.includes("128k"), "chars round to k above a thousand");
+      assert.ok(line.includes("3 dangling"), "dangling links and their count");
+      assert.ok(line.includes("5 orphans"));
+      assert.ok(line.includes("2 near-duplicates"));
+      assert.ok(line.includes("last consolidation 11-08"), "the last run, month-day only");
+    });
+
+    it("no digest segment — an old host — means no line, not an error", async () => {
+      const row = await loadBundle();
+      const exports = instantiate(row);
+      assert.equal(exports.healthLine(null, identity), null);
+      assert.equal(exports.healthLine(undefined, identity), null);
+      assert.equal(exports.healthLine("digest", identity), null);
+      assert.equal(exports.healthLine({}, identity), null, "no nodes field, no line");
+      assert.equal(exports.healthLine({ nodes: "34" }, identity), null, "a count that is not a number is no count");
+    });
+
+    it("a metric the host could not compute is skipped, not shown as zero", async () => {
+      const row = await loadBundle();
+      const line = instantiate(row).healthLine(
+        { ...full, danglingLinks: null, chars: 940, lastDreamAt: null },
+        t,
+      );
+      assert.ok(line);
+      assert.ok(!line.includes("dangling"), "the unknown metric disappears");
+      assert.ok(line.includes("5 orphans") && line.includes("2 near-duplicates"), "the known ones stay");
+      assert.ok(line.includes("940"), "sizes under a thousand stay themselves");
+      assert.ok(!line.includes("11-08"), "no last run, no date");
+    });
+
+    it("both dictionaries own the health words — and the shipped wording is pinned", async () => {
+      const row = await loadBundle();
+      const exports = instantiate(row);
+      const { ctx, dicts } = makeCtx(undefined);
+      exports.apply(ctx);
+      const dict = dicts["node-memory"];
+      assert.ok(dict, "apply registers the locale dictionary");
+      for (const key of ["kbHead", "kbChars", "kbDangling", "kbOrphans", "kbNearDuplicates"]) {
+        assert.ok(dict.zh[key], `zh carries ${key}`);
+        assert.ok(dict.en[key], `en carries ${key}`);
+      }
+      const zh = exports.healthLine(full, (key) => dict.zh[key] ?? key);
+      assert.equal(zh, "知识库：34 节点 / 128k 字符 · 断链 3 · 孤儿 5 · 疑似重复 2 · 上次整理 11-08");
+      const en = exports.healthLine(full, (key) => dict.en[key] ?? key);
+      assert.equal(
+        en,
+        "Knowledge base: 34 nodes / 128k chars · 3 dangling · 5 orphans · 2 near-duplicates · last consolidation 11-08",
+      );
+    });
   });
 });
