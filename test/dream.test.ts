@@ -175,7 +175,59 @@ it("the reconciliation rule sits between citing and correcting", () => {
   assert.match(DREAM_RULES, /correct that node in place/);
   assert.doesNotMatch(DREAM_RULES, /supersedes=/);
   assert.match(DREAM_RULES, /"unverified"/);
-  assert.ok(DREAM_RULES.includes("8. digest nodes are the team layer"), "the rules stay numbered");
+  assert.ok(DREAM_RULES.includes("9. digest nodes are the team layer"), "the rules stay numbered");
+});
+
+it("the representation rule sits between reconciliation and contradiction", () => {
+  const reconcile = DREAM_RULES.indexOf("Reconcile");
+  const representation = DREAM_RULES.indexOf("representation layer");
+  const contradicts = DREAM_RULES.indexOf("contradicts");
+  assert.ok(reconcile !== -1 && representation !== -1 && contradicts !== -1);
+  assert.ok(reconcile < representation, "fixing the representation follows reconciliation");
+  assert.ok(representation < contradicts, "and precedes the contradiction rule");
+  assert.match(DREAM_RULES, /never the node/);
+  assert.match(DREAM_RULES, /near-duplicate nodes into the newer one/);
+  assert.match(DREAM_RULES, /never copy its lines into body pages/);
+});
+
+it("material reports dangling links and duplicates without rewriting the nodes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mem-dream-repr-"));
+  const store = new MemoryStore({ root });
+  const body =
+    "发布窗口固定在周五 22:00，发布前要跑完回归清单，回滚走上一版镜像，窗口里的变更要单独登记。";
+  await store.write({
+    relPath: "digest/procedure/发布清单.md",
+    content: `---\nname: 发布清单\nupdated: 2026-11-01\n---\n\n${body}\n`,
+  });
+  await store.write({
+    relPath: "digest/procedure/发布清单副本.md",
+    content: `---\nname: 发布清单副本\nupdated: 2026-11-02\n---\n\n${body}\n\n窗口结束后补周报。\n`,
+  });
+  await store.write({
+    relPath: "digest/wiki/部署.md",
+    content: "---\nname: 部署\n---\n\n细节见 [[不存在的节点]]。\n",
+  });
+  const watched = [
+    "digest/procedure/发布清单.md",
+    "digest/procedure/发布清单副本.md",
+    "digest/wiki/部署.md",
+  ];
+  const before = await Promise.all(watched.map((path) => store.read(path)));
+
+  const material = await buildDreamMaterial({ store });
+
+  assert.match(material, /## Dangling wikilinks/);
+  assert.match(material, /## Possible duplicates/);
+  assert.match(material, /digest\/wiki\/部署\.md → \[\[不存在的节点\]\] — \(no candidates\)/,
+    "the page holding a broken link is never its own candidate");
+  assert.ok(
+    material.includes("digest/procedure/发布清单.md ↔ digest/procedure/发布清单副本.md"),
+    "the near-duplicate pair is named in the material",
+  );
+  assert.match(material, /\(0\.\d{2}\)/, "each pair carries its similarity");
+
+  const after = await Promise.all(watched.map((path) => store.read(path)));
+  assert.deepEqual(after, before, "reporting never rewrites the nodes it describes");
 });
 
 it("material lists what exists and what to do", async () => {
