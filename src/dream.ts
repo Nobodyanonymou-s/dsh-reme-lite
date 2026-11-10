@@ -6,9 +6,18 @@
  * reachable from inside a plugin, so the material is built here and given to
  * whoever will do the writing: an agent we spawned, the current session's
  * agent, or the user via the `memory_dream` tool. One builder, three callers.
+ *
+ * The writer usually cannot read the transcript itself: its fs tools stop at
+ * the session workspace, which the memory root sits outside of. Pointing at
+ * `session/dialog/*.jsonl` would be a rule nobody can follow, so a bounded
+ * recent slice travels inside the material for reconciliation.
  */
 
+import { readFile, readdir, stat } from "node:fs/promises";
+import { join } from "node:path";
+
 import type { MemoryStore } from "./store.ts";
+import { SOURCE } from "./turns.ts";
 
 export type Language = "zh" | "en";
 
@@ -17,6 +26,10 @@ export interface DreamMaterialInput {
   pendingTurns?: number;
   days?: number;
   language?: Language;
+  /** How many days of raw dialogue travel with the material. */
+  transcriptDays?: number;
+  /** Hard character cap on that transcript block, whatever the day holds. */
+  transcriptBudget?: number;
 }
 
 export async function buildDreamMaterial(input: DreamMaterialInput): Promise<string> {
@@ -24,6 +37,10 @@ export async function buildDreamMaterial(input: DreamMaterialInput): Promise<str
   const recent = await input.store.recentDaily(days);
   const digest = input.store.digestTitles();
   const pending = input.pendingTurns ?? 0;
+  const transcripts = await transcriptSection(input.store.root, {
+    days: input.transcriptDays,
+    budget: input.transcriptBudget,
+  });
 
   return [
     "# Consolidation material",
@@ -37,6 +54,8 @@ export async function buildDreamMaterial(input: DreamMaterialInput): Promise<str
     "",
     "## Existing digest nodes",
     digest.length ? digest.map((path) => `- ${path}`).join("\n") : "- (none)",
+    "",
+    transcripts,
     "",
     "## Rules",
     DREAM_RULES,
@@ -52,14 +71,195 @@ export const DREAM_RULES = [
   "3. Create or merge digest nodes with memory_write: digest/personal,",
   "   digest/procedure, digest/wiki. One topic per node.",
   "4. Every digest node cites its sources with [[daily/YYYY-MM-DD]] links.",
-  "5. If a new fact contradicts an existing digest node, correct that node",
+  "5. Reconcile against the recent transcripts before merging, but only",
+  "   re-check conclusions that could have changed: dates, names, ports,",
+  "   preferences, plans in flight, status. When a note no longer matches,",
+  "   correct the old node with supersedes=<old path> instead of adding a",
+  '   second one; when you cannot verify, say "unverified" — never present an',
+  "   unverified note as confirmed.",
+  "6. If a new fact contradicts an existing digest node, correct that node",
   "   instead of adding a second, conflicting one.",
-  "6. Prefer few good nodes over many thin ones. Deleting nothing is fine:",
+  "7. Prefer few good nodes over many thin ones. Deleting nothing is fine:",
   "   adding one correct node beats rewriting five.",
-  "7. digest nodes are the team layer — every agent reads them. Anything you",
+  "8. digest nodes are the team layer — every agent reads them. Anything you",
   "   are still unsure about stays in daily/ (private to its writer), not in",
   "   digest: a settled team layer is worth more than a fast one.",
 ].join("\n");
+
+const DIALOG_DIR = join("session", "dialog");
+const TRANSCRIPT_DAYS = 3;
+const TRANSCRIPT_BUDGET = 12000;
+/** Assistant replies are trimmed to this; the user's words never are. */
+const ASSISTANT_CAP = 300;
+const DAY_MS = 86_400_000;
+
+interface DialogLine {
+  role: "user" | "assistant";
+  text: string;
+  time: number;
+}
+
+/** One question and the conclusion it ended on. */
+interface DialogTurn {
+  user: DialogLine;
+  reply: DialogLine | null;
+}
+
+/**
+ * The reconciliation slice of the material: recent raw dialogue, one entry per
+ * question. The block, heading included, is capped at `budget`, so the
+ * transcript cannot grow with the workspace and eat the consolidation context.
+ */
+export async function transcriptSection(
+  root: string,
+  options: { days?: number; budget?: number; now?: number } = {},
+): Promise<string> {
+  const days = Math.max(1, options.days ?? TRANSCRIPT_DAYS);
+  const budget = Math.max(0, options.budget ?? TRANSCRIPT_BUDGET);
+  const now = options.now ?? Date.now();
+
+  const header = [
+    `## Recent transcripts (last ${days} days, for verification only)`,
+    "Ground truth only — verify against it, never copy it into digest nodes.",
+  ];
+  // The body gets what the heading and its disclaimer leave of the budget.
+  const allowance = budget - (header.join("\n").length + 1);
+
+  const turns = groupByUserTurn(await readDialog(join(root, DIALOG_DIR), { now, days }));
+  const body = newestFirst(turns.map(renderTurn), allowance);
+
+  return [...header, body.length ? body.join("\n") : "- (none)"].join("\n");
+}
+
+/**
+ * Read every transcript line inside the window, oldest first. The journal is
+ * append-only and crash-prone by design, so each line is handled on its own:
+ * a torn final line or a malformed record is skipped, never fatal, or one bad
+ * session would take the whole consolidation pass down with it.
+ */
+async function readDialog(dir: string, range: { now: number; days: number }): Promise<DialogLine[]> {
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return []; // no transcript directory yet: nothing to reconcile against
+  }
+  const lines: DialogLine[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".jsonl")) continue;
+    const absolute = join(dir, name);
+    // Sessions accumulate forever, so a file whose last append predates the
+    // window cannot hold a line inside it — skip the parse entirely.
+    const info = await stat(absolute).catch(() => null);
+    if (info && range.now - info.mtimeMs >= range.days * DAY_MS) continue;
+    let raw: string;
+    try {
+      raw = await readFile(absolute, "utf8");
+    } catch {
+      continue; // deleted between the listing and the read
+    }
+    for (const row of raw.split("\n")) {
+      const line = row.trim();
+      if (!line) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      const record = parsed as Record<string, unknown>;
+      const role = record.role === "user" || record.role === "assistant" ? record.role : null;
+      const text = typeof record.text === "string" && record.text.trim() ? record.text : null;
+      if (!role || !text) continue;
+      if (isOwnInjection(record, text)) continue;
+      const time = Date.parse(typeof record.at === "string" ? record.at : "");
+      if (!Number.isFinite(time)) continue;
+      if (range.now - time >= range.days * DAY_MS) continue;
+      lines.push({ role, text, time });
+    }
+  }
+  return lines.sort((a, b) => a.time - b.time);
+}
+
+/**
+ * The plugin's own injections sit in the transcript like any other turn, but
+ * they are our output, not ground truth — a node reconciled against them would
+ * end up confirming itself. Old transcripts carry no source field, so those
+ * lines are recognised by content; the source check covers whatever comes next.
+ */
+function isOwnInjection(record: Record<string, unknown>, text: string): boolean {
+  const source = record.source;
+  if (source && typeof source === "object" && !Array.isArray(source)) {
+    const marked = source as Record<string, unknown>;
+    if (marked.kind === SOURCE || marked.plugin === SOURCE) return true;
+  }
+  const head = text.trimStart();
+  return (
+    head.startsWith("# 长期记忆") ||
+    head.startsWith("# Long-term memory") ||
+    text.includes("[[node-memory:dream]]")
+  );
+}
+
+/**
+ * Collapse the window into one entry per question. The transcript has no turn
+ * numbers, so a user line is the boundary; the last assistant line before the
+ * next question is that turn's conclusion, and the steps before it are
+ * narration on the way there. Assistant lines opening the window answer a
+ * question older than the window — kept they would verify nothing, so they go.
+ */
+function groupByUserTurn(lines: DialogLine[]): DialogTurn[] {
+  const turns: DialogTurn[] = [];
+  let current: DialogTurn | null = null;
+  for (const line of lines) {
+    if (line.role === "user") {
+      if (current) turns.push(current);
+      current = { user: line, reply: null };
+    } else if (current) {
+      current.reply = line;
+    }
+  }
+  if (current) turns.push(current);
+  return turns;
+}
+
+function renderTurn(turn: DialogTurn): string {
+  const lines = [`- ${stamp(turn.user.time)} user: ${turn.user.text}`];
+  if (turn.reply) {
+    lines.push(`- ${stamp(turn.reply.time)} assistant: ${capAssistant(turn.reply.text)}`);
+  }
+  return lines.join("\n");
+}
+
+function capAssistant(text: string): string {
+  return text.length > ASSISTANT_CAP ? `${text.slice(0, ASSISTANT_CAP)}…` : text;
+}
+
+function stamp(time: number): string {
+  const date = new Date(time);
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/**
+ * Keep the newest entries that fit and drop the rest, oldest first: what
+ * reconciliation needs is the latest state of the facts, not the history.
+ * The kept slice stays contiguous so a turn never loses its answer.
+ */
+function newestFirst(entries: string[], allowance: number): string[] {
+  const kept: string[] = [];
+  let spent = 0;
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const entry = entries[i];
+    if (entry === undefined) continue;
+    const cost = entry.length + 1; // the joining newline, charged to be safe
+    if (spent + cost > allowance) break;
+    kept.unshift(entry);
+    spent += cost;
+  }
+  return kept;
+}
 
 /**
  * How a node earns its colour. Written for a model that reads it once, so it is

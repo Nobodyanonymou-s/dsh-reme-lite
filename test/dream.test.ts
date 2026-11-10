@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "vitest";
@@ -21,6 +21,141 @@ async function workspace(): Promise<{ root: string; store: MemoryStore }> {
   });
   return { root, store };
 }
+
+const MINUTE = 60_000;
+const TRANSCRIPT_BUDGET = 12000;
+
+interface FixtureLine {
+  role: "user" | "assistant";
+  text: string;
+  minutesAgo: number;
+  /** Stands in for the source field a future transcript format may carry. */
+  source?: Record<string, unknown>;
+}
+
+function dialogLine(line: FixtureLine): string {
+  return JSON.stringify({
+    session_id: "s1-abc",
+    role: line.role,
+    at: new Date(Date.now() - line.minutesAgo * MINUTE).toISOString(),
+    text: line.text,
+    ...(line.source ? { source: line.source } : {}),
+  });
+}
+
+async function writeDialog(root: string, lines: FixtureLine[], name = "s1-abc.jsonl"): Promise<void> {
+  const dir = join(root, "session", "dialog");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, name), `${lines.map(dialogLine).join("\n")}\n`, "utf8");
+}
+
+/**
+ * The transcript slice of the material, cut out between its heading and the
+ * rules: budget and filtering claims are checked against the slice alone.
+ */
+function transcriptSlice(material: string): string {
+  const start = material.indexOf("## Recent transcripts");
+  const end = material.indexOf("\n## Rules", start);
+  assert.ok(start >= 0, "the material carries a transcript section");
+  assert.ok(end > start, "the transcript section sits before the rules");
+  return material.slice(start, end);
+}
+
+/** A transcript with the shapes reconciliation has to tell apart. */
+async function dialogWorkspace(): Promise<{ store: MemoryStore; long: string }> {
+  const { root, store } = await workspace();
+  const long = "端口确认完毕。" + "补充说明，路由与证书都不需要改动。".repeat(40);
+  await writeDialog(root, [
+    // Assistant steps before the first question answer a turn outside the window.
+    { role: "assistant", text: "（上一问的收尾，无需重复。）", minutesAgo: 40 },
+    { role: "user", text: "把部署端口改成 8443。", minutesAgo: 30 },
+    { role: "assistant", text: "我先看下当前配置。", minutesAgo: 29 },
+    { role: "assistant", text: "已把部署端口改为 8443，重启后生效。", minutesAgo: 28 },
+    // Our own injections, in both the old (content-only) and future (sourced) shape.
+    { role: "assistant", text: "[[node-memory:dream]] 长期记忆索引已更新。", minutesAgo: 27 },
+    { role: "assistant", text: "# 长期记忆\n- 部署端口 8443", minutesAgo: 26 },
+    { role: "assistant", text: "记忆已写入。", minutesAgo: 25, source: { kind: "node-memory" } },
+    { role: "user", text: "再确认一下端口。", minutesAgo: 10 },
+    { role: "assistant", text: long, minutesAgo: 9 },
+    // Older than the default window: must stay out.
+    { role: "user", text: "十年前的旧偏好：编辑器用 Vim。", minutesAgo: 60 * 24 * 10 },
+  ]);
+  return { store, long };
+}
+
+it("material carries recent transcripts for reconciliation", async () => {
+  const { store, long } = await dialogWorkspace();
+  const material = await buildDreamMaterial({ store, pendingTurns: 0 });
+  const section = transcriptSlice(material);
+
+  assert.match(material, /Recent transcripts \(last 3 days, for verification only\)/);
+  assert.match(material, /Ground truth only — verify against it, never copy it into digest nodes\./);
+
+  // The question and its conclusion travel; the narration on the way does not.
+  assert.ok(section.includes("把部署端口改成 8443。"));
+  assert.ok(section.includes("已把部署端口改为 8443，重启后生效。"));
+  assert.ok(!section.includes("我先看下当前配置。"));
+  assert.ok(!section.includes("（上一问的收尾，无需重复。）"));
+  assert.ok(section.indexOf("已把部署端口改为 8443") < section.indexOf("再确认一下端口。"), "turns stay in order");
+
+  // Our own injections never come back as ground truth.
+  assert.ok(!section.includes("[[node-memory:dream]]"));
+  assert.ok(!section.includes("# 长期记忆"));
+  assert.ok(!section.includes("记忆已写入。"));
+
+  // One long reply is trimmed to the cap; the user's words never are.
+  assert.ok(section.includes(`${long.slice(0, 300)}…`));
+  assert.ok(!section.includes(long));
+
+  assert.ok(section.length <= TRANSCRIPT_BUDGET, `transcript block must stay within budget, got ${section.length}`);
+});
+
+it("a workspace without transcripts degrades to (none)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mem-notranscript-"));
+  const store = new MemoryStore({ root });
+  const material = await buildDreamMaterial({ store });
+  assert.match(material, /Recent transcripts \(last 3 days[^\n]*\nGround truth only[^\n]*\n- \(none\)/);
+});
+
+it("transcriptDays decides how far the window reaches", async () => {
+  const { store } = await dialogWorkspace();
+  const narrow = transcriptSlice(await buildDreamMaterial({ store }));
+  assert.ok(!narrow.includes("十年前的旧偏好"), "rows outside the window stay out");
+  const wide = transcriptSlice(await buildDreamMaterial({ store, transcriptDays: 30 }));
+  assert.ok(wide.includes("十年前的旧偏好"), "a wider window reaches them");
+});
+
+it("the transcript block keeps the newest turns once the budget runs out", async () => {
+  const { root, store } = await workspace();
+  await writeDialog(root, [
+    {
+      role: "user",
+      text: "旧的一问：上周的部署窗口是什么时候？顺便说一下当时的发布流程，方便我回忆。",
+      minutesAgo: 50,
+    },
+    { role: "assistant", text: "旧的一答：上周三是 22:00 到 23:00。", minutesAgo: 49 },
+    { role: "user", text: "新的一问：今天的部署窗口是什么时候？", minutesAgo: 5 },
+    { role: "assistant", text: "新的一答：今天 22:00 到 23:00。", minutesAgo: 4 },
+  ]);
+  const section = transcriptSlice(await buildDreamMaterial({ store, transcriptBudget: 300 }));
+
+  assert.ok(section.length <= 300, `transcript block must stay within budget, got ${section.length}`);
+  assert.ok(section.includes("新的一问"));
+  assert.ok(section.includes("新的一答"));
+  assert.ok(!section.includes("旧的一问"), "the oldest turn is what gets dropped");
+});
+
+it("the reconciliation rule sits between citing and correcting", () => {
+  const cites = DREAM_RULES.indexOf("cites");
+  const reconcile = DREAM_RULES.indexOf("Reconcile");
+  const contradicts = DREAM_RULES.indexOf("contradicts");
+  assert.ok(cites !== -1 && reconcile !== -1 && contradicts !== -1);
+  assert.ok(cites < reconcile, "citing sources comes first");
+  assert.ok(reconcile < contradicts, "reconciling against the transcript precedes the contradiction rule");
+  assert.match(DREAM_RULES, /supersedes=<old path>/);
+  assert.match(DREAM_RULES, /"unverified"/);
+  assert.ok(DREAM_RULES.includes("8. digest nodes are the team layer"), "the rules stay numbered");
+});
 
 it("material lists what exists and what to do", async () => {
   const { store } = await workspace();
