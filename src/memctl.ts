@@ -5,7 +5,7 @@
  *
  *   node bin/memctl.js init
  *   node bin/memctl.js write digest/wiki/demo "some durable fact"
- *   node bin/memctl.js search "durable fact"
+ *   node bin/memctl.js search "durable fact" [--limit 10] [--include-superseded]
  *   node bin/memctl.js capture session-1 user "we ship on Friday 4pm"
  *   node bin/memctl.js schedule status | enable [cron] | disable
  *   node bin/memctl.js dream
@@ -59,13 +59,27 @@ switch (command) {
     break;
   }
   case "search": {
-    const query = args.join(" ");
-    if (!query) {
-      fail("usage: memctl search <query>");
+    // #70 参数面：--limit N / --include-superseded（此前硬编码 limit:5、无开关——MCP memory_search
+    // 的 include_superseded/top_k 到 CLI 即失效，过滤在 store 内完成、CLI 层加不回）
+    const rest: string[] = [];
+    let limit = 5;
+    let includeSuperseded = false;
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === "--limit") {
+        limit = Number(args[++i]);
+      } else if (args[i] === "--include-superseded") {
+        includeSuperseded = true;
+      } else {
+        rest.push(args[i]);
+      }
+    }
+    const query = rest.join(" ");
+    if (!query || !Number.isInteger(limit) || limit < 1 || limit > 50) {
+      fail("usage: memctl search [--limit N(1-50)] [--include-superseded] <query>");
       break;
     }
     await store.rebuild();
-    const hits = store.search(query, { limit: 5 });
+    const hits = store.search(query, { limit, includeSuperseded });
     if (hits.length === 0) {
       console.log("No relevant memory found.");
       break;
