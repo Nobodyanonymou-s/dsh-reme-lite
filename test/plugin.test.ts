@@ -959,8 +959,10 @@ it("briefEnabled injects a five-section brief after the guidance", async () => {
   assert.ok(brief.length <= 2000, `within the budget, got ${brief.length}`);
 
   assert.match(brief, /## 当前状态/);
-  assert.match(brief, /决定：部署端口原记 8080，现已改 3000（digest\/wiki\/部署端口\.md，2026-11-09）/);
-  assert.match(brief, /决定：每周五下午四点发版（digest\/wiki\/发布流程\.md，2026-11-08）/);
+  // No role label: until a decision kind exists, one would mislabel every
+  // recent update as a decision — and a wrong label rides into every session.
+  assert.match(brief, /- 部署端口原记 8080，现已改 3000（digest\/wiki\/部署端口\.md，2026-11-09）/);
+  assert.match(brief, /- 每周五下午四点发版（digest\/wiki\/发布流程\.md，2026-11-08）/);
   assert.match(brief, /## 关于你/);
   assert.match(brief, /回复先结论后细节（digest\/personal\/协作文风\.md，2026-11-07）/);
   assert.match(brief, /## 已推翻的/);

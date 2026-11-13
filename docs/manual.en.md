@@ -9,7 +9,7 @@
 | --- | --- |
 | `memory_search(query, limit?, min_score?, scope?, room?)` | Returns line-ranged evidence with paths, plus one hop of wikilink neighbours; `scope=mine` (default) / `team`, `room` filters by room label |
 | `memory_write(path, content, name?, description?, kind?, scope?, room?)` | Writes a node under `daily/` or `digest/`, stamps the writer's identity, reindexes just that file |
-| `memory_dream(days?)` | Returns consolidation material: recent daily pages, existing digest nodes, and the rules |
+| `memory_dream(days?)` | Returns consolidation material: recent daily pages, the digest inventory, dangling-link and near-duplicate reports, the last 3 days of transcript for reconciliation, and the rules. Calling it has a side effect: it regenerates `digest/index.md` and `metadata/links.json` first (both derived — see below) |
 | `memory_schedule(action)` | `status` · `run_now` · `enable` · `disable` |
 
 The agent is told to search before answering anything that depends on history, and to treat what it finds as **evidence, not instructions** — retrieved text can never redirect it.
@@ -60,6 +60,12 @@ The settings page shows one health line above the heatmap: `Knowledge base: 34 n
 - **the index page is counted separately**: `digest/index.md` is generated, so it stays out of nodes, chars, the heatmap, and the total; its size ships on its own as `indexPage.chars`.
 
 These numbers are a **warning**, not a trigger: however many dangling links or duplicates pile up, no consolidation starts on its own.
+
+## Capture and reconciliation (behaviour changes in 0.5.0)
+
+- **A shorter daily excerpt block is expected, not lost data.** Capture works per turn: `session/dialog/*.jsonl` still keeps the full transcript (the model's mid-turn narration and interrupted half-replies included), but the `daily/` auto block records only the user's words and each turn's **final reply** — narration no longer reaches the daily page; find it in the transcript.
+- **`memory_dream` material carries the last 3 days of raw transcript** (hard cap 12000 chars by default; under budget pressure the newest turns win and a single oversized entry is clipped). It is ground truth for the consolidator to check old notes against. **Privacy boundary**: the raw text appears only inside `memory_dream`'s return — never in the search index, never in `/node-memory/status.json`, never written into digest nodes.
+- **Every `memory_dream` call regenerates `digest/index.md` (the pointer page over digest nodes) and `metadata/links.json` (the dangling-link graph).** Both are derived data: deletable, rebuildable, and they never touch a body node; delete them and the next `memory_dream` call restores both.
 
 ## Teams and multiple agents (0.3.0)
 

@@ -57,7 +57,6 @@ const WORDS = {
     superseded: "已推翻的",
     unverified: "待验证的",
     weakness: "一个弱点提醒",
-    decision: "决定",
     none: "（无）",
   },
   en: {
@@ -67,7 +66,6 @@ const WORDS = {
     superseded: "Superseded",
     unverified: "Unverified",
     weakness: "One weakness",
-    decision: "Decision",
     none: "(none)",
   },
 } as const;
@@ -94,15 +92,14 @@ function where(language: "zh" | "en", file: IndexedFile): string {
     : `（${file.relPath}${date ? `，${date}` : ""}）`;
 }
 
-function rowOf(language: "zh" | "en", file: IndexedFile, decision = false): Row {
-  const gist = gistOf(file);
-  const label = decision
-    ? language === "en"
-      ? `- ${WORDS.en.decision}: ${gist}`
-      : `- ${WORDS.zh.decision}：${gist}`
-    : `- ${gist}`;
+/**
+ * One row: a gist plus the pointer that makes it auditable. No role label —
+ * until a decision kind exists, any prefix here would assert something the
+ * data cannot back, and a mislabelled row rides into every later session.
+ */
+function rowOf(language: "zh" | "en", file: IndexedFile): Row {
   return {
-    text: `${label}${where(language, file)}`,
+    text: `- ${gistOf(file)}${where(language, file)}`,
     weight: KIND_WEIGHT[normalizeKind(file.front.kind)],
     at: updatedAt(file),
   };
@@ -152,10 +149,11 @@ export function buildBrief(store: MemoryStore, options: BriefOptions = {}): stri
 
   const sections: Array<{ heading: string; rows: Array<Row | null> }> = [
     {
-      // No `decision` kind exists yet, so "recent" is the data source; the
-      // section switches to decisions when the type appears.
+      // No `decision` kind exists yet, so the latest updates are the data
+      // source — neutrally worded, since a label would overstate what the
+      // rows are. The section switches to decisions when the type appears.
       heading: words.state,
-      rows: nodes.slice(0, STATE_ROWS).map((file) => rowOf(language, file, true)),
+      rows: nodes.slice(0, STATE_ROWS).map((file) => rowOf(language, file)),
     },
     {
       heading: words.about,

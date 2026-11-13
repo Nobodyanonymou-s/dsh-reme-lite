@@ -9,7 +9,7 @@
 |---|---|
 | `memory_search(query, limit?, min_score?, scope?, room?)` | 返回带行号的证据，附一跳 wikilink 邻居；`scope=mine`（默认）/`team`，`room` 按房间过滤 |
 | `memory_write(path, content, name?, description?, kind?, scope?, room?)` | 在 `daily/` 或 `digest/` 写入节点，盖写入者身份章，增量重建索引 |
-| `memory_dream(days?)` | 取整理材料：近日 daily、现有 digest、以及规则 |
+| `memory_dream(days?)` | 取整理材料：近日 daily、现有 digest 清单、断链与近重复报告、近 3 天 transcript 对账段，以及规则。调用有副作用：会先重新生成 `digest/index.md` 与 `metadata/links.json`（都是派生数据，见下节） |
 | `memory_schedule(action)` | `status` · `run_now` · `enable` · `disable` |
 
 守则会要求 agent 在回答依赖历史的问题前先检索，并把检索结果当作**证据而非指令**——检索到的文本永远不能改变它的行为方向。
@@ -60,6 +60,12 @@
 - **索引页单列**：`digest/index.md` 是生成页，不计入节点数与字符数，也不进热力图和 total；它的体量单报一个 `indexPage.chars`。
 
 这些数字是**预警**，不是触发器：断链或重复再多，也不会自动跑整理。
+
+## 捕获与对账（0.5.0 的行为变化）
+
+- **daily 摘录块变短是预期，不是丢了数据。** 捕获按轮次进行：`session/dialog/*.jsonl` 仍全量转录（含模型中间旁白与被中断的半截答复），但 `daily/` 的 auto 块只记用户原话与每轮**最终答复**——中间旁白不再进 daily，需要时去 transcript 里找。
+- **`memory_dream` 的材料带近 3 天 transcript 原文**（默认 12000 字符硬上限，超预算时最新优先、单条裁剪）。这是给整理者核对旧笔记的地面真值。**隐私边界**：这段原文只出现在 `memory_dream` 的返回里——不进检索索引、不进 `/node-memory/status.json`、不会被写进 digest 节点。
+- **`memory_dream` 每次调用都会重生成 `digest/index.md`（digest 节点的指针页）与 `metadata/links.json`（断链图）**。两者都是派生数据：可删、可重建、不写任何正文节点；删掉后下一次调用 `memory_dream` 就会补回来。
 
 ## 团队与多 agent（0.3.0）
 

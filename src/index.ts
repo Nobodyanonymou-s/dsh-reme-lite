@@ -285,6 +285,8 @@ export const inject = ["agents", "sessions", "tools"];
 const DREAM_MARKER = "[[node-memory:dream]]";
 const TICK_MS = 30_000;
 const MAX_EVIDENCE_CHARS = 4000;
+/** Sessions whose brief hash the process remembers, newest kept. */
+const BRIEF_SEEN_CAP = 200;
 
 export interface MemoryConfig {
   workspace: string;
@@ -629,6 +631,12 @@ async function onSessionStart(runtime: Runtime, agent: AgentLike): Promise<void>
       const brief = buildBrief(store, { language: config.language, budget: config.briefBudget });
       const hash = shortHash(brief);
       if (briefSeen.get(sessionId) !== hash) {
+        // A long-lived host creates sessions without end; the dedupe table is
+        // bounded so it cannot grow with them. Insertion order is eviction
+        // order — the oldest entry is exactly the one least likely to return.
+        if (briefSeen.size >= BRIEF_SEEN_CAP && !briefSeen.has(sessionId)) {
+          briefSeen.delete(briefSeen.keys().next().value ?? sessionId);
+        }
         briefSeen.set(sessionId, hash);
         agent.inject(
           createUserMessage({
