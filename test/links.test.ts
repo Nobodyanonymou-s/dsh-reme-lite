@@ -75,6 +75,36 @@ it("reports dangling wikilinks and hints the real node by frontmatter name", asy
   assert.ok(candidatePaths("上线手册", store).includes("digest/wiki/manual.md"));
 });
 
+it("internal plugin markers are neither links nor dangling entries", async () => {
+  const { store } = await makeStore();
+  await store.write({
+    relPath: "digest/wiki/整理.md",
+    content: renderNode(
+      { name: "整理" },
+      "定时整理提醒 [[node-memory:dream]] 与 [[recol:dream]] 会出现在 daily 页里。\n",
+    ),
+  });
+  const graph = buildLinkGraph(store);
+  assert.deepEqual(graph.nodes["digest/wiki/整理.md"], { out: [], in: [] });
+  assert.deepEqual(graph.dangling, []);
+  // The candidate guard exists so BM25 never improvises hints for plumbing.
+  assert.deepEqual(candidatePaths("node-memory:dream", store), []);
+});
+
+it("a real broken link is still reported next to internal markers", async () => {
+  const { store } = await makeStore();
+  await store.write({
+    relPath: "digest/wiki/整理.md",
+    content: renderNode(
+      { name: "整理" },
+      "提醒标记 [[node-memory:dream]]、[[recol:dream]]，真正想链接的是 [[不存在的话题]]。\n",
+    ),
+  });
+  const graph = buildLinkGraph(store);
+  assert.deepEqual(graph.dangling, [{ from: "digest/wiki/整理.md", target: "不存在的话题" }]);
+  assert.ok(!graph.nodes["digest/wiki/整理.md"]!.out.includes("node-memory:dream"));
+});
+
 it("a node without links has empty out and in, and no dangling entries", async () => {
   const { store } = await makeStore();
   const graph = buildLinkGraph(store);
