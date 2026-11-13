@@ -267,6 +267,28 @@ it("material reports dangling links and duplicates without rewriting the nodes",
   assert.deepEqual(after, before, "reporting never rewrites the nodes it describes");
 });
 
+it("the dream reminder marker never reads as a dangling wikilink", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mem-dream-marker-"));
+  const store = new MemoryStore({ root });
+  // The reminder text the plugin itself injects into daily pages used to
+  // surface as a broken link with invented BM25 candidates.
+  await store.write({
+    relPath: "daily/2026-11-04.md",
+    content: "---\nname: 2026-11-04\n---\n\n[[node-memory:dream]] 记得整理今天的记录。\n",
+  });
+  await store.write({
+    relPath: "digest/wiki/部署.md",
+    content: "---\nname: 部署\n---\n\n细节见 [[不存在的节点]]。\n",
+  });
+  const material = await buildDreamMaterial({ store });
+  const start = material.indexOf("## Dangling wikilinks");
+  const end = material.indexOf("\n## Possible duplicates", start);
+  assert.ok(start >= 0 && end > start, "the material carries a dangling section");
+  const section = material.slice(start, end);
+  assert.ok(!section.includes("node-memory:dream"), "the reminder marker is not reported as broken");
+  assert.match(section, /digest\/wiki\/部署\.md → \[\[不存在的节点\]\]/, "real broken links still surface");
+});
+
 it("material lists what exists and what to do", async () => {
   const { store } = await workspace();
   const material = await buildDreamMaterial({ store, pendingTurns: 3, days: 7 });

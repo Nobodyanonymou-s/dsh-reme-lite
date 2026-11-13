@@ -43,6 +43,20 @@ export interface DuplicatePair {
   similarity: number;
 }
 
+/**
+ * Wikilink namespaces this plugin family uses as internal markers, not
+ * knowledge links. `[[node-memory:dream]]` is the dream reminder that lands in
+ * daily pages, `[[recol:dream]]` a sibling plugin's; both resolve to nothing
+ * and would pollute the dangling list forever. Add future marker prefixes
+ * here instead of scattering them through the graph logic.
+ */
+export const INTERNAL_LINK_NAMESPACES = ["node-memory", "recol"];
+
+/** True for targets like `[[node-memory:dream]]`: plugin plumbing, not a note. */
+function isInternalMarker(target: string): boolean {
+  return new RegExp(`^(${INTERNAL_LINK_NAMESPACES.join("|")}):`).test(target);
+}
+
 /** Body nodes of the digest layer, the derived index page excluded. */
 export function digestNodes(store: MemoryStore): IndexedFile[] {
   return store.files.filter(
@@ -64,7 +78,12 @@ export function buildLinkGraph(store: MemoryStore): LinkGraph {
   for (const file of sources) {
     const targets = new Set<string>();
     for (const chunk of file.chunks) {
-      for (const target of extractWikilinks(chunk.text)) targets.add(target);
+      for (const target of extractWikilinks(chunk.text)) {
+        // Internal markers ride in the page text but name no node; skipping
+        // them here keeps them out of `out`, of `dangling`, and of `in` alike.
+        if (isInternalMarker(target)) continue;
+        targets.add(target);
+      }
     }
     nodes[file.relPath]!.out = [...targets];
     for (const target of targets) {
@@ -84,6 +103,9 @@ export function buildLinkGraph(store: MemoryStore): LinkGraph {
  * whoever fixes the link; the store never rewrites a node on its own.
  */
 export function candidatePaths(target: string, store: MemoryStore, exclude?: string): string[] {
+  // Guard against future call sites: an internal marker never has candidates,
+  // so BM25 must not be asked to improvise hits for plugin plumbing.
+  if (isInternalMarker(target)) return [];
   const nameToPath = new Map<string, string>();
   for (const file of store.files) {
     if (file.relPath === INDEX_PAGE_PATH || file.relPath === exclude) continue;
