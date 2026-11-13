@@ -168,6 +168,14 @@ it("writes the index page and the link graph, and skips the page with no digest 
   assert.match(page, /^---\n/);
   assert.ok(store.files.some((file) => file.relPath === "digest/index.md"), "the page stays indexed");
 
+  // The material lists knowledge nodes, not the generated pointer sheet:
+  // presenting index.md as "one more node to maintain" contradicts the rule
+  // that calls it generated.
+  const material = await buildDreamMaterial({ store });
+  const listing = material.slice(material.indexOf("## Existing digest nodes"), material.indexOf("## Dangling"));
+  assert.ok(listing.includes(".md"), "the section lists the body nodes");
+  assert.ok(!listing.includes("digest/index.md"), "the generated page is not listed as a node");
+
   const graph = JSON.parse(await readFile(join(root, "metadata", "links.json"), "utf8"));
   assert.equal(typeof graph.builtAt, "string");
   assert.ok(graph.nodes["digest/wiki/发布流程.md"]);

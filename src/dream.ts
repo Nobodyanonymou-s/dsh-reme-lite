@@ -16,7 +16,7 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-import { buildLinkGraph, candidatePaths, nearDuplicates } from "./links.ts";
+import { buildLinkGraph, candidatePaths, digestNodes, nearDuplicates } from "./links.ts";
 import type { LinkGraph, DuplicatePair } from "./links.ts";
 import type { MemoryStore } from "./store.ts";
 import { SOURCE } from "./turns.ts";
@@ -37,7 +37,9 @@ export interface DreamMaterialInput {
 export async function buildDreamMaterial(input: DreamMaterialInput): Promise<string> {
   const days = input.days ?? 7;
   const recent = await input.store.recentDaily(days);
-  const digest = input.store.digestTitles();
+  // digestNodes, not digestTitles: the generated index page is a pointer
+  // sheet, not knowledge, and must not read as one more node to maintain.
+  const digest = digestNodes(input.store).map((file) => file.relPath);
   const pending = input.pendingTurns ?? 0;
   const transcripts = await transcriptSection(input.store.root, {
     days: input.transcriptDays,
@@ -121,9 +123,9 @@ export const DREAM_RULES = [
   "   unverified note as confirmed.",
   "6. Fix the representation layer before adding content: point dangling",
   "   wikilinks at the real node (or drop the link — never the node); merge",
-  "   near-duplicate nodes into the newer one with supersedes=<old path>",
-  "   instead of keeping both; digest/index.md is a generated page of",
-  "   pointers — never copy its lines into body pages.",
+  "   near-duplicate nodes into the newer one instead of keeping both, and",
+  "   rewrite the old node's body down to a one-line pointer at the new",
+  "   one; digest/index.md is generated — never copy its lines into body pages.",
   "7. If a new fact contradicts an existing digest node, correct that node",
   "   instead of adding a second, conflicting one.",
   "8. Prefer few good nodes over many thin ones. Deleting nothing is fine:",
