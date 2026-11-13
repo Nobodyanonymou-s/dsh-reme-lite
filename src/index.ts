@@ -740,6 +740,9 @@ function registerRoutes(
     const state = await runtime.tasks.load();
     const status = await buildStatus({
       root: runtime.config.workspace,
+      // The digest health numbers are graph-derived, so the status route hands
+      // over the live index instead of re-deriving anything here.
+      store: runtime.store,
       task: {
         enabled: runtime.config.dreamEnabled,
         recordEnabled: state.enabled,
