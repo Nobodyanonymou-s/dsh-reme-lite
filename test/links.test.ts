@@ -149,6 +149,10 @@ it("the index page groups by domain, sorts by updated, and respects the size cap
   );
   assert.match(page, /^---\nname: 索引 \/ Index\n/);
   assert.match(page, /本页是生成的指针页，正文节点不要复制这里的内容。/);
+  // The generated file is read directly too, so a blank line must separate the
+  // fixed head from the first section (and from the empty-store placeholder).
+  assert.ok(page.includes("\n\n## personal"), "blank line before the first section");
+  assert.ok(!page.includes("\n\n\n"), "no stray double blank lines");
 
   // Fixed domain order, then newest first inside a domain.
   assert.ok(page.indexOf("## personal") < page.indexOf("## procedure"), "fixed domain order");
@@ -159,6 +163,13 @@ it("the index page groups by domain, sorts by updated, and respects the size cap
   // A gist never grows into a second body: it is clipped to the exported cap.
   assert.ok(!page.includes(long), "the long description never lands verbatim");
   assert.ok(page.includes(`${long.slice(0, INDEX_GIST_MAX_CHARS - 1)}…`));
+});
+
+it("the empty index page keeps the same blank line before its placeholder", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mem-links-empty-page-"));
+  const page = renderIndexPage(new MemoryStore({ root }));
+  assert.ok(page.endsWith("- (none)\n"), "the placeholder line is the whole body");
+  assert.ok(page.includes("本页是生成的指针页，正文节点不要复制这里的内容。\n\n- (none)"), "blank line before the placeholder");
 });
 
 it("near-duplicate digest nodes are reported with a similarity inside 0-1", async () => {
