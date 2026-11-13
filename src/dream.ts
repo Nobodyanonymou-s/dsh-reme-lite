@@ -74,8 +74,9 @@ export const DREAM_RULES = [
   "5. Reconcile against the recent transcripts before merging, but only",
   "   re-check conclusions that could have changed: dates, names, ports,",
   "   preferences, plans in flight, status. When a note no longer matches,",
-  "   correct the old node with supersedes=<old path> instead of adding a",
-  '   second one; when you cannot verify, say "unverified" — never present an',
+  "   correct that node in place and add one line saying what changed and why",
+  "   (the old value stays readable in that line) instead of adding a second",
+  '   one; when you cannot verify, say "unverified" — never present an',
   "   unverified note as confirmed.",
   "6. If a new fact contradicts an existing digest node, correct that node",
   "   instead of adding a second, conflicting one.",
@@ -245,7 +246,12 @@ function stamp(time: number): string {
 /**
  * Keep the newest entries that fit and drop the rest, oldest first: what
  * reconciliation needs is the latest state of the facts, not the history.
- * The kept slice stays contiguous so a turn never loses its answer.
+ * The kept slice stays contiguous so a turn never loses its answer. One
+ * exception: a paste larger than the whole block must not blank the section —
+ * an empty "(none)" under a budget that could have shown the newest question
+ * hides the very thing reconciliation needs most. The oversized newest entry
+ * goes in clipped instead; only a block too small to hold even a timestamp
+ * degrades to (none).
  */
 function newestFirst(entries: string[], allowance: number): string[] {
   const kept: string[] = [];
@@ -254,12 +260,22 @@ function newestFirst(entries: string[], allowance: number): string[] {
     const entry = entries[i];
     if (entry === undefined) continue;
     const cost = entry.length + 1; // the joining newline, charged to be safe
-    if (spent + cost > allowance) break;
+    if (spent + cost > allowance) {
+      // Charge the trailing newline the section joins with, so an exactly-full
+      // clip still lands inside the budget.
+      if (kept.length === 0 && allowance >= CLIP_FLOOR) {
+        return [`${entry.slice(0, allowance - 2)}…`];
+      }
+      break;
+    }
     kept.unshift(entry);
     spent += cost;
   }
   return kept;
 }
+
+/** Below this many characters a clipped entry is noise, not evidence. */
+const CLIP_FLOOR = 30;
 
 /**
  * How a node earns its colour. Written for a model that reads it once, so it is

@@ -145,6 +145,24 @@ it("the transcript block keeps the newest turns once the budget runs out", async
   assert.ok(!section.includes("旧的一问"), "the oldest turn is what gets dropped");
 });
 
+it("an oversized paste is clipped in, never a blank (none)", async () => {
+  const { root, store } = await workspace();
+  await writeDialog(root, [
+    { role: "user", text: "旧的一问：上周的部署窗口是什么时候？", minutesAgo: 50 },
+    { role: "user", text: `把整份报告粘进来：${"季度数据行。".repeat(800)}`, minutesAgo: 5 },
+    { role: "assistant", text: "新的一答：已看完，结论是 Q3 增长 12%。", minutesAgo: 4 },
+  ]);
+  const section = transcriptSlice(await buildDreamMaterial({ store, transcriptBudget: 300 }));
+
+  // The newest turn is bigger than the whole block: dropping it wholesale
+  // would show "(none)" exactly when the user pasted something worth
+  // reconciling. It goes in clipped instead.
+  assert.ok(section.length <= 300, `transcript block must stay within budget, got ${section.length}`);
+  assert.ok(section.includes("季度数据行"), "the head of the paste survives");
+  assert.ok(!section.includes("(none)"), "an oversized entry never blanks the section");
+  assert.ok(!section.includes("旧的一问"), "the older turn still yields to the newer one");
+});
+
 it("the reconciliation rule sits between citing and correcting", () => {
   const cites = DREAM_RULES.indexOf("cites");
   const reconcile = DREAM_RULES.indexOf("Reconcile");
@@ -152,7 +170,10 @@ it("the reconciliation rule sits between citing and correcting", () => {
   assert.ok(cites !== -1 && reconcile !== -1 && contradicts !== -1);
   assert.ok(cites < reconcile, "citing sources comes first");
   assert.ok(reconcile < contradicts, "reconciling against the transcript precedes the contradiction rule");
-  assert.match(DREAM_RULES, /supersedes=<old path>/);
+  // memory_write on this baseline has no supersedes parameter: a rule that
+  // tells the model to use one would be a rule it cannot follow.
+  assert.match(DREAM_RULES, /correct that node in place/);
+  assert.doesNotMatch(DREAM_RULES, /supersedes=/);
   assert.match(DREAM_RULES, /"unverified"/);
   assert.ok(DREAM_RULES.includes("8. digest nodes are the team layer"), "the rules stay numbered");
 });
