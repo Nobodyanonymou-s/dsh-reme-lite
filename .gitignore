@@ -1,6 +1,9 @@
 # build output
 dist/
-lib/
+# lib/ is shipped on purpose: the GitHub-tarball install must be extract-only
+# (no build scripts, no devDependencies fetch — pnpm >= 11 blocks those behind
+# allowBuilds). `pnpm build` before commit when src/ changed; `prepack` still
+# rebuilds at npm-pack time.
 *.tgz
 .npm-cache/
 
