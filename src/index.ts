@@ -26,6 +26,7 @@ import { Capture, dateKey } from "./capture.ts";
 import { buildDreamMaterial, dreamPrompt } from "./dream.ts";
 import { DreamQueue } from "./dream-queue.ts";
 import { DEFAULT_CRON, DreamTaskStore } from "./dream-task.ts";
+import { writeRepresentation } from "./links.ts";
 import { renderNode } from "./markdown.ts";
 import { describeNextRun } from "./schedule.ts";
 import { stampScope } from "./scope.ts";
@@ -1171,6 +1172,9 @@ function registerTools(ctx: HostContext, runtime: ToolsRuntime): () => void {
           });
         }
       }
+      // Freshen the derived pages first, so the material's dangling links and
+      // duplicate pairs describe the workspace as it stands right now.
+      await writeRepresentation(store);
       const material = await buildDreamMaterial({
         store,
         pendingTurns: capture.pending,
@@ -1237,6 +1241,9 @@ function registerTools(ctx: HostContext, runtime: ToolsRuntime): () => void {
 
       if (action === "run_now") {
         await refresh();
+        // Same contract as memory_dream: the representation refreshes before
+        // the material reads it.
+        await writeRepresentation(store);
         const material = await buildDreamMaterial({ store, pendingTurns: capture.pending, language: config.language });
         return dreamPrompt(material);
       }

@@ -35,11 +35,13 @@ export interface SearchHit {
 
 export const INDEXED_DIRS = ["daily", "digest"];
 
-interface IndexedFile {
+export interface IndexedFile {
   relPath: string;
   mtimeMs: number;
   chunks: Chunk[];
   meta: ScopeMeta;
+  /** Parsed frontmatter: the link graph and the index page read name/description/updated. */
+  front: Record<string, string>;
 }
 
 interface IndexedChunk {
@@ -167,6 +169,7 @@ export class MemoryStore {
       mtimeMs,
       chunks: chunkMarkdown(text, { maxChars: this.maxChars }),
       meta: parseScope(data),
+      front: data,
     };
   }
 

@@ -16,6 +16,8 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
+import { buildLinkGraph, candidatePaths, digestNodes, nearDuplicates } from "./links.ts";
+import type { LinkGraph, DuplicatePair } from "./links.ts";
 import type { MemoryStore } from "./store.ts";
 import { SOURCE } from "./turns.ts";
 
@@ -35,12 +37,18 @@ export interface DreamMaterialInput {
 export async function buildDreamMaterial(input: DreamMaterialInput): Promise<string> {
   const days = input.days ?? 7;
   const recent = await input.store.recentDaily(days);
-  const digest = input.store.digestTitles();
+  // digestNodes, not digestTitles: the generated index page is a pointer
+  // sheet, not knowledge, and must not read as one more node to maintain.
+  const digest = digestNodes(input.store).map((file) => file.relPath);
   const pending = input.pendingTurns ?? 0;
   const transcripts = await transcriptSection(input.store.root, {
     days: input.transcriptDays,
     budget: input.transcriptBudget,
   });
+  // The representation layer travels with the material so the writer can fix
+  // links and duplicates in the same pass that adds content.
+  const graph = buildLinkGraph(input.store);
+  const duplicates = nearDuplicates(input.store);
 
   return [
     "# Consolidation material",
@@ -55,6 +63,10 @@ export async function buildDreamMaterial(input: DreamMaterialInput): Promise<str
     "## Existing digest nodes",
     digest.length ? digest.map((path) => `- ${path}`).join("\n") : "- (none)",
     "",
+    danglingSection(input.store, graph),
+    "",
+    duplicateSection(duplicates),
+    "",
     transcripts,
     "",
     "## Rules",
@@ -62,6 +74,37 @@ export async function buildDreamMaterial(input: DreamMaterialInput): Promise<str
     "",
     kindRules(input.language),
   ].join("\n");
+}
+
+/** Dangling entries that fit in the material; a large backlog is a listing job, not a reading one. */
+const MAX_DANGLING_LINKS = 20;
+/** Duplicate pairs shown; more than that means the digest needs a pass of its own. */
+const MAX_DUPLICATE_PAIRS = 5;
+
+/**
+ * Broken links with a hint each: a node whose frontmatter name matches the
+ * target, else BM25 over the target text. The store never rewrites the link —
+ * the reader points it at the real node, drops it, or creates the missing one.
+ */
+function danglingSection(store: MemoryStore, graph: LinkGraph): string {
+  const lines = ["## Dangling wikilinks"];
+  if (!graph.dangling.length) return [...lines, "- (none)"].join("\n");
+  for (const link of graph.dangling.slice(0, MAX_DANGLING_LINKS)) {
+    const candidates = candidatePaths(link.target, store, link.from);
+    const hint = candidates.length ? ` — candidates: ${candidates.join(", ")}` : " — (no candidates)";
+    lines.push(`- ${link.from} → [[${link.target}]]${hint}`);
+  }
+  return lines.join("\n");
+}
+
+/** Near-identical digest nodes as a pair list; merging stays a human-reviewed edit. */
+function duplicateSection(pairs: DuplicatePair[]): string {
+  const lines = ["## Possible duplicates"];
+  if (!pairs.length) return [...lines, "- (none)"].join("\n");
+  for (const pair of pairs.slice(0, MAX_DUPLICATE_PAIRS)) {
+    lines.push(`- ${pair.a} ↔ ${pair.b} (${pair.similarity.toFixed(2)})`);
+  }
+  return lines.join("\n");
 }
 
 export const DREAM_RULES = [
@@ -78,11 +121,16 @@ export const DREAM_RULES = [
   "   (the old value stays readable in that line) instead of adding a second",
   '   one; when you cannot verify, say "unverified" — never present an',
   "   unverified note as confirmed.",
-  "6. If a new fact contradicts an existing digest node, correct that node",
+  "6. Fix the representation layer before adding content: point dangling",
+  "   wikilinks at the real node (or drop the link — never the node); merge",
+  "   near-duplicate nodes into the newer one instead of keeping both, and",
+  "   rewrite the old node's body down to a one-line pointer at the new",
+  "   one; digest/index.md is generated — never copy its lines into body pages.",
+  "7. If a new fact contradicts an existing digest node, correct that node",
   "   instead of adding a second, conflicting one.",
-  "7. Prefer few good nodes over many thin ones. Deleting nothing is fine:",
+  "8. Prefer few good nodes over many thin ones. Deleting nothing is fine:",
   "   adding one correct node beats rewriting five.",
-  "8. digest nodes are the team layer — every agent reads them. Anything you",
+  "9. digest nodes are the team layer — every agent reads them. Anything you",
   "   are still unsure about stays in daily/ (private to its writer), not in",
   "   digest: a settled team layer is worth more than a fast one.",
 ].join("\n");
