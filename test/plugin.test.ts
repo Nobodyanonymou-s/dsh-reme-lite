@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { it } from "vitest";
 
 import { apply, createUserMessage, hasGuidance, name, resolveLanguage, toJsonSchema, turnFromEvent } from "../src/index.ts";
@@ -867,4 +867,201 @@ it("stableIdentity requires a name or a preset, not a bare session id", async ()
   assert.equal(stableIdentity(bareExec, { agentName: "" }), false);
   assert.equal(stableIdentity(bareExec, { agentName: "whale-7" }), true);
   assert.equal(stableIdentity(undefined, { agentName: "" }), false);
+});
+
+// --- the opt-in session brief (issue 05) -------------------------------------
+
+/**
+ * Write a memory node straight to disk, frontmatter included — the shape a
+ * dream run would leave behind, without going through the tool.
+ */
+async function writeNode(root: string, relPath: string, front: Record<string, string>, body: string): Promise<void> {
+  const lines = ["---", ...Object.entries(front).map(([key, value]) => `${key}: ${value}`), "---", "", body, ""];
+  const absolute = join(root, relPath);
+  await mkdir(dirname(absolute), { recursive: true });
+  await writeFile(absolute, lines.join("\n"), "utf8");
+}
+
+/**
+ * A small but complete digest for the brief tests: a notable wiki node, a
+ * user-declared personal node citing its source, a conflict node that carries
+ * `supersedes`, the lesson page — and a daily page holding an assistant aside
+ * that must never reach the brief by any route.
+ */
+async function briefWorkspace(): Promise<string> {
+  const root = await workspace();
+  await writeNode(
+    root,
+    "digest/wiki/发布流程.md",
+    { name: "发布流程", description: "每周五下午四点发版", updated: "2026-11-08", kind: "notable" },
+    "发布窗口是周五下午四点，回滚先切流量。",
+  );
+  await writeNode(
+    root,
+    "digest/personal/协作文风.md",
+    { name: "协作文风", description: "回复先结论后细节", updated: "2026-11-07", kind: "user-declared" },
+    "用户明确要求：先结论后细节。来源：[[daily/2026-11-07]]",
+  );
+  await writeNode(
+    root,
+    "digest/wiki/部署端口.md",
+    {
+      name: "部署端口",
+      description: "部署端口原记 8080，现已改 3000",
+      updated: "2026-11-09",
+      kind: "conflict",
+      supersedes: "digest/wiki/旧端口.md",
+    },
+    "端口以 3000 为准。",
+  );
+  await writeNode(root, "digest/self/操作教训.md", { name: "操作教训", updated: "2026-11-06" }, "# 操作教训\n\n先回滚再排查，不要现场调参。");
+  await writeNode(
+    root,
+    "daily/2026-11-09.md",
+    { name: "2026-11-09", description: "auto-captured conversation notes" },
+    "<!-- notes:auto -->\n- 10:00 **user**: 提到菲比斯计划\n- 10:05 **assistant**: 我先查一下克罗诺配置\n<!-- /notes:auto -->",
+  );
+  return root;
+}
+
+it("without briefEnabled a fresh session gets guidance only — no brief", async () => {
+  const root = await briefWorkspace();
+  const { ctx } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false, language: "zh" });
+  await settle();
+
+  const injected: any[] = [];
+  ctx.emit("agent/created", { agent: fakeAgent("session-brief-off", injected) });
+  await settle();
+
+  assert.equal(injected.length, 1, "guidance only, even though digest content exists");
+  assert.match(injected[0].content[0].text, /长期记忆/);
+  assert.doesNotMatch(injected[0].content[0].text, /会话简报/);
+});
+
+it("briefEnabled injects a five-section brief after the guidance", async () => {
+  const root = await briefWorkspace();
+  const { ctx } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false, briefEnabled: true, briefBudget: 2000, language: "zh" });
+  await settle();
+
+  const injected: any[] = [];
+  ctx.emit("agent/created", { agent: fakeAgent("session-brief-on", injected) });
+  await settle();
+
+  assert.equal(injected.length, 2, "guidance first, brief second");
+  assert.equal(injected[1].source.kind, "node-memory");
+  assert.equal(injected[1].source.form, "instructions", "the brief shares the guidance's source form");
+
+  const brief = injected[1].content[0].text;
+  assert.match(brief, /^# 会话简报$/m);
+  assert.equal((brief.match(/^## /gm) ?? []).length, 5, "the five fixed sections");
+  assert.ok(brief.length <= 2000, `within the budget, got ${brief.length}`);
+
+  assert.match(brief, /## 当前状态/);
+  // No role label: until a decision kind exists, one would mislabel every
+  // recent update as a decision — and a wrong label rides into every session.
+  assert.match(brief, /- 部署端口原记 8080，现已改 3000（digest\/wiki\/部署端口\.md，2026-11-09）/);
+  assert.match(brief, /- 每周五下午四点发版（digest\/wiki\/发布流程\.md，2026-11-08）/);
+  assert.match(brief, /## 关于你/);
+  assert.match(brief, /回复先结论后细节（digest\/personal\/协作文风\.md，2026-11-07）/);
+  assert.match(brief, /## 已推翻的/);
+  assert.match(brief, /- 部署端口原记 8080，现已改 3000（digest\/wiki\/部署端口\.md，2026-11-09）/);
+  assert.match(brief, /## 待验证的\n（无）/);
+  assert.match(brief, /## 一个弱点提醒/);
+  assert.match(brief, /先回滚再排查，不要现场调参/);
+
+  assert.doesNotMatch(brief, /菲比斯/, "the daily page never enters the brief");
+  assert.doesNotMatch(brief, /克罗诺/, "the assistant aside never enters the brief");
+});
+
+it("the same brief is not injected twice into one session", async () => {
+  const root = await briefWorkspace();
+  const { ctx } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false, briefEnabled: true, language: "zh" });
+  await settle();
+
+  const session: { id: string; header: { id: string }; events: any[] } = {
+    id: "session-brief-dup",
+    header: { id: "session-brief-dup" },
+    events: [],
+  };
+  const first: any[] = [];
+  ctx.emit("agent/created", {
+    agent: { session, inbox: { nextStep: [] }, inject: (message: unknown) => first.push(message) },
+  });
+  await settle();
+  assert.equal(first.length, 2, "guidance and brief on the first construction");
+
+  // The Host replaying `agent/created` over a resumed session: whatever the
+  // process already injected is in the events, and must not be injected again.
+  session.events = first.map((message) => ({ type: "user/message", data: message }));
+  const second: any[] = [];
+  ctx.emit("agent/created", {
+    agent: { session, inbox: { nextStep: [] }, inject: (message: unknown) => second.push(message) },
+  });
+  await settle();
+  assert.equal(second.length, 0, "guidance and brief alike stay deduped");
+});
+
+it("an over-budget brief drops whole rows and keeps every heading", async () => {
+  const root = await workspace();
+  // Enough bulk that a 300-character budget must eat rows: a kindless state
+  // row and the lesson line go first, user-declared rows next, conflict rows
+  // survive longest — the priority order the brief promises.
+  await writeNode(root, "digest/wiki/清单甲.md", { name: "清单甲", description: "清单甲记录了常规巡检的完整步骤与联系人名单供随时查阅", updated: "2026-11-01" }, "常规巡检步骤。");
+  await writeNode(root, "digest/self/操作教训.md", { name: "操作教训", updated: "2026-11-09" }, "# 操作教训\n\n变更窗口内先冻结配置再观察指标，宁可多等一个周期也不要现场调参，历史两次事故都源于现场改动。");
+  await writeNode(root, "digest/personal/偏好甲.md", { name: "偏好甲", description: "用户在例会上明确要求所有回复都先给结论再给细节依据", updated: "2026-11-04", kind: "user-declared" }, "先结论后细节。来源：[[daily/2026-11-04]]");
+  await writeNode(root, "digest/personal/偏好乙.md", { name: "偏好乙", description: "用户强调周五下午不安排发布以免占用复盘时间窗口", updated: "2026-11-05", kind: "user-declared" }, "周五下午不发版。来源：[[daily/2026-11-05]]");
+  await writeNode(root, "digest/personal/偏好丙.md", { name: "偏好丙", description: "用户要求涉及生产环境的操作必须先在预发环境演练一遍", updated: "2026-11-06", kind: "user-declared" }, "生产操作先预发。来源：[[daily/2026-11-06]]");
+  await writeNode(root, "digest/wiki/端口旧值.md", { name: "端口旧值", description: "部署端口原记 8080 与现值不一致本节点记录旧值仅作追溯", updated: "2026-11-07", kind: "conflict" }, "旧端口 8080 已废弃。");
+  await writeNode(root, "digest/wiki/阈值旧值.md", { name: "阈值旧值", description: "告警阈值原记百分之九十现改百分之八十五旧结论不再生效", updated: "2026-11-08", kind: "conflict" }, "旧阈值已废弃。");
+
+  const { ctx } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false, briefEnabled: true, briefBudget: 300, language: "zh" });
+  await settle();
+
+  const injected: any[] = [];
+  ctx.emit("agent/created", { agent: fakeAgent("session-brief-budget", injected) });
+  await settle();
+
+  assert.equal(injected.length, 2);
+  const brief = injected[1].content[0].text;
+  assert.ok(brief.length <= 300, `within the 300-char budget, got ${brief.length}`);
+  assert.equal((brief.match(/^## /gm) ?? []).length, 5, "the skeleton never loses a heading");
+  assert.match(brief, /告警阈值原记/, "the highest-priority conflict row survives");
+  assert.ok(brief.includes("（无）"), "a section that lost every row reads its placeholder");
+  assert.doesNotMatch(brief, /变更窗口/, "low-priority rows go whole, never clipped mid-line");
+  assert.doesNotMatch(brief, /清单甲/, "rows outside every section stay out entirely");
+});
+
+it("an empty workspace still yields the five-section placeholder brief", async () => {
+  const root = await workspace();
+  const { ctx } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false, briefEnabled: true, language: "zh" });
+  await settle();
+
+  const injected: any[] = [];
+  ctx.emit("agent/created", { agent: fakeAgent("session-brief-empty", injected) });
+  await settle();
+
+  assert.equal(injected.length, 2, "the brief injects even with nothing to say");
+  const brief = injected[1].content[0].text;
+  assert.equal((brief.match(/^## /gm) ?? []).length, 5);
+  assert.equal((brief.match(/（无）/g) ?? []).length, 5, "every section reads its placeholder");
+  assert.ok(brief.length <= 900);
+});
+
+it("a settings.json switch overrides the unset mount config for the brief", async () => {
+  const root = await briefWorkspace();
+  await mkdir(join(root, "metadata"), { recursive: true });
+  await writeFile(join(root, "metadata", "settings.json"), `${JSON.stringify({ briefEnabled: true })}\n`, "utf8");
+  const { ctx } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false, language: "zh" });
+  await settle();
+
+  const injected: any[] = [];
+  ctx.emit("agent/created", { agent: fakeAgent("session-brief-saved", injected) });
+  await settle();
+  assert.equal(injected.length, 2, "the page's saved choice wins over an unset mount key");
 });

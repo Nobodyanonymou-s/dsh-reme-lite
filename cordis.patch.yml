@@ -20,3 +20,6 @@
             # auto = follow the system locale; zh/en override it. The settings
             # dropdown writes this same key.
             language: "auto"
+            # Session brief injected at agent/created. Off by default: turning
+            # it on is an A/B experiment, not a default (briefBudget 200-4000).
+            briefEnabled: false
