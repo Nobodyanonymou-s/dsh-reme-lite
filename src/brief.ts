@@ -10,9 +10,13 @@
  * Admission is structural, not editorial. The brief reads only the digest
  * nodes the index already holds, so a `daily/` page or an assistant aside
  * cannot reach this code at all; the "about you" section narrows further to
- * personal nodes the user declared or that cite a source wikilink. The
- * "unverified" section is a placeholder until a prediction ledger exists —
- * it never synthesizes content to fill itself.
+ * personal nodes the user declared or that cite a source wikilink, and ranks
+ * them by kind before recency so a declared preference outlives newer asides.
+ * The "superseded" section lists only nodes that carry a real `supersedes`
+ * chain — a conflict kind marks "this corrects something", not "this was
+ * overturned", so it never lands there. The "unverified" section is a
+ * placeholder until a prediction ledger exists — it never synthesizes content
+ * to fill itself.
  *
  * Pure and synchronous: the caller guarantees the store index is fresh.
  */
@@ -44,10 +48,19 @@ const WEAKNESS_CHARS = 140;
 const WEAKNESS_PATH = "digest/self/操作教训.md";
 
 /**
- * Kind priority for budget drops: conflict survives longest, normal goes
- * first — the same ordering the heatmap and the dream rubric already use.
+ * Kind priority for attention: conflict loudest, normal quietest — the same
+ * ordering the heatmap and the dream rubric already use. Drives both the
+ * "about you" ranking (declared beats recent) and the budget drop order.
  */
 const KIND_WEIGHT: Record<MemoryKind, number> = { normal: 0, notable: 1, "user-declared": 2, conflict: 3 };
+
+/**
+ * Which section gives up rows first when the budget bites, indexed by
+ * section: current state, then superseded, then about you. The brief exists
+ * to carry the user's standing preferences into a session, so those rows are
+ * defended the longest; state is news and goes first.
+ */
+const SECTION_DROP_RANK = [0, 2, 1, 3, 3] as const;
 
 const WORDS = {
   zh: {
@@ -163,13 +176,26 @@ export function buildBrief(store: MemoryStore, options: BriefOptions = {}): stri
             file.relPath.startsWith("digest/personal/") &&
             (normalizeKind(file.front.kind) === "user-declared" || citesSource(file)),
         )
+        // Kind before recency: a newer aside must not evict a declared
+        // preference, which is what the 0.5.1 probe caught on a real
+        // workspace. Ties fall back to newest first, then path for stability.
+        .sort(
+          (a, b) =>
+            KIND_WEIGHT[normalizeKind(b.front.kind)] - KIND_WEIGHT[normalizeKind(a.front.kind)] ||
+            updatedAt(b) - updatedAt(a) ||
+            (a.relPath < b.relPath ? -1 : 1),
+        )
         .slice(0, ABOUT_ROWS)
         .map((file) => rowOf(language, file)),
     },
     {
+      // Only a real `supersedes` chain means "this replaced that". A conflict
+      // kind says the node corrects something and still holds — listing it
+      // here read as "the current conclusion was overturned", which is the
+      // opposite of what it is. No chain in the workspace, no rows.
       heading: words.superseded,
       rows: nodes
-        .filter((file) => (file.front.supersedes ?? "").trim() !== "" || normalizeKind(file.front.kind) === "conflict")
+        .filter((file) => (file.front.supersedes ?? "").trim() !== "")
         .slice(0, SUPERSEDED_ROWS)
         .map((file) => rowOf(language, file)),
     },
@@ -191,18 +217,30 @@ export function buildBrief(store: MemoryStore, options: BriefOptions = {}): stri
     return parts.join("\n");
   };
 
-  // Sort by what goes first, not by what reads first: the budget eats
-  // lowest-weight rows whole (oldest first inside a weight) until the text
-  // fits. Headings and placeholders are not rows — the skeleton always
-  // survives, and a section that loses every row falls back to （无）.
+  // Sort by what goes first, not by what reads first: the budget eats rows
+  // whole — state section first, superseded next, about you last, and inside
+  // a section the lowest-weight (oldest first) row goes. Every section that
+  // still has rows keeps at least one: the floors can hold the text over
+  // budget, because a brief that dropped the last preference line to fit is
+  // not a smaller brief, it is a different one. Headings and placeholders are
+  // not rows — the skeleton always survives.
   const droppable = sections.flatMap((section, index) =>
     section.rows.map((row, at) => ({ index, at, row: row as Row })),
   );
-  droppable.sort((a, b) => a.row.weight - b.row.weight || a.row.at - b.row.at);
+  droppable.sort(
+    (a, b) =>
+      SECTION_DROP_RANK[a.index]! - SECTION_DROP_RANK[b.index]! ||
+      a.row.weight - b.row.weight ||
+      a.row.at - b.row.at,
+  );
 
   let text = render();
   for (const target of droppable) {
     if (text.length <= budget) break;
+    // Section floor: the last remaining row of a non-empty section stays —
+    // （无） there would read as absence, not as economy.
+    const left = sections[target.index]!.rows.filter((row) => row !== null);
+    if (left.length <= 1) continue;
     sections[target.index]!.rows[target.at] = null;
     text = render();
   }

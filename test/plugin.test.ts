@@ -924,6 +924,69 @@ async function briefWorkspace(): Promise<string> {
   return root;
 }
 
+/** One section's rows out of a rendered brief — assertions target the section, not the whole text. */
+function sectionOf(brief: string, heading: string): string {
+  return brief.match(new RegExp(`## ${heading}\\n([\\s\\S]*?)(?=\\n\\n## |$)`))?.[1]?.trim() ?? "";
+}
+
+/**
+ * A personal-heavy digest for the selection tests: one old user-declared
+ * preference plus three newer personal nodes (a conflict and two notables,
+ * each citing a source). Under recency the newer asides evict the preference
+ * — the 0.5.1 failure a real workspace probe caught; under kind-first
+ * selection the preference holds its slot and the newest notable misses out.
+ * No node carries `supersedes`, so the superseded section must stay empty.
+ */
+async function briefPreferenceWorkspace(): Promise<string> {
+  const root = await workspace();
+  await writeNode(
+    root,
+    "digest/personal/饮食偏好.md",
+    {
+      name: "饮食偏好",
+      description: "他自述的饮食偏好：猪鸡牛等肉类、绿叶菜、土豆番茄，忌大蒜；减脂周期 10-20 至 12-31",
+      updated: "2026-11-02",
+      kind: "user-declared",
+    },
+    "忌大蒜，减脂周期至 12-31。来源：[[daily/2026-11-02]]",
+  );
+  await writeNode(
+    root,
+    "digest/personal/工作区布局.md",
+    {
+      name: "工作区布局",
+      description: "项目根只放项目目录与四个抽屉，散文件一律不进根，工具路径按抽屉归位",
+      updated: "2026-11-10",
+      kind: "conflict",
+    },
+    "根目录约定以抽屉结构为准。来源：[[digest/wiki/工作区约定]]",
+  );
+  await writeNode(
+    root,
+    "digest/personal/造工具方式.md",
+    {
+      name: "造工具方式",
+      description: "造工具先写一次性脚本跑通流程，再决定是否沉淀为可复用工具",
+      updated: "2026-11-09",
+      kind: "notable",
+    },
+    "先脚本后工具。来源：[[daily/2026-11-09]]",
+  );
+  await writeNode(
+    root,
+    "digest/personal/记忆建模.md",
+    {
+      name: "记忆建模",
+      description: "记忆条目写触发条件而非一律谨慎",
+      updated: "2026-11-08",
+      kind: "notable",
+    },
+    "写触发条件不写告诫。来源：[[daily/2026-11-08]]",
+  );
+  await writeNode(root, "digest/self/操作教训.md", { name: "操作教训", updated: "2026-11-06" }, "# 操作教训\n\n先回滚再排查，不要现场调参。");
+  return root;
+}
+
 it("without briefEnabled a fresh session gets guidance only — no brief", async () => {
   const root = await briefWorkspace();
   const { ctx } = makeCtx(fakeSchedule());
@@ -1006,9 +1069,10 @@ it("the same brief is not injected twice into one session", async () => {
 
 it("an over-budget brief drops whole rows and keeps every heading", async () => {
   const root = await workspace();
-  // Enough bulk that a 300-character budget must eat rows: a kindless state
-  // row and the lesson line go first, user-declared rows next, conflict rows
-  // survive longest — the priority order the brief promises.
+  // Enough bulk that a 300-character budget must eat rows — and the drop
+  // order is by section first: current state sheds its lowest-weight rows,
+  // about you only gives one up when state has hit its one-row floor, and
+  // every section that still has rows keeps at least one.
   await writeNode(root, "digest/wiki/清单甲.md", { name: "清单甲", description: "清单甲记录了常规巡检的完整步骤与联系人名单供随时查阅", updated: "2026-11-01" }, "常规巡检步骤。");
   await writeNode(root, "digest/self/操作教训.md", { name: "操作教训", updated: "2026-11-09" }, "# 操作教训\n\n变更窗口内先冻结配置再观察指标，宁可多等一个周期也不要现场调参，历史两次事故都源于现场改动。");
   await writeNode(root, "digest/personal/偏好甲.md", { name: "偏好甲", description: "用户在例会上明确要求所有回复都先给结论再给细节依据", updated: "2026-11-04", kind: "user-declared" }, "先结论后细节。来源：[[daily/2026-11-04]]");
@@ -1029,10 +1093,102 @@ it("an over-budget brief drops whole rows and keeps every heading", async () => 
   const brief = injected[1].content[0].text;
   assert.ok(brief.length <= 300, `within the 300-char budget, got ${brief.length}`);
   assert.equal((brief.match(/^## /gm) ?? []).length, 5, "the skeleton never loses a heading");
-  assert.match(brief, /告警阈值原记/, "the highest-priority conflict row survives");
-  assert.ok(brief.includes("（无）"), "a section that lost every row reads its placeholder");
-  assert.doesNotMatch(brief, /变更窗口/, "low-priority rows go whole, never clipped mid-line");
+  // State goes first: the kindless lesson row, then the older conflict. The
+  // section floor stops the diet there — its newest conflict row survives.
+  assert.doesNotMatch(brief, /digest\/self\/操作教训\.md/, "the lowest-weight state row goes before anything else");
+  assert.doesNotMatch(brief, /端口旧值/, "inside a section the older row goes first, kind aside");
+  assert.match(brief, /告警阈值原记/, "the state floor keeps one row — the newest conflict");
+  // About you is defended: only one row beyond the floor goes, and it goes
+  // whole — never clipped mid-line.
+  assert.doesNotMatch(brief, /例会上明确要求/, "the oldest preference row goes once state has hit its floor");
+  assert.match(brief, /周五下午不安排发布/, "the remaining preference rows hold");
+  // Single-row sections are all floor: the weakness line survives a budget
+  // that once dropped it.
+  assert.match(brief, /变更窗口/, "the weakness line is a one-row section, so the floor keeps it");
+  assert.ok(brief.includes("（无）"), "superseded has no chain in this workspace and reads its placeholder");
   assert.doesNotMatch(brief, /清单甲/, "rows outside every section stay out entirely");
+});
+
+it("about you ranks kind before recency; superseded stays empty without a chain", async () => {
+  const root = await briefPreferenceWorkspace();
+  const { ctx } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false, briefEnabled: true, briefBudget: 900, language: "zh" });
+  await settle();
+
+  const injected: any[] = [];
+  ctx.emit("agent/created", { agent: fakeAgent("session-brief-pref", injected) });
+  await settle();
+
+  assert.equal(injected.length, 2);
+  const brief = injected[1].content[0].text;
+
+  const about = sectionOf(brief, "关于你");
+  // The preference is the oldest candidate here; recency alone would have
+  // filled all three slots with the newer asides, which is what 0.5.1 did on
+  // a real workspace.
+  assert.match(about, /忌大蒜.*饮食偏好\.md，2026-11-02/, "the declared preference holds a slot despite being the oldest");
+  assert.match(about, /工作区布局\.md/, "the personal conflict with a source ranks with it");
+  assert.ok(
+    about.indexOf("工作区布局") < about.indexOf("忌大蒜"),
+    "conflict outranks user-declared, user-declared outranks notable",
+  );
+  assert.doesNotMatch(about, /记忆建模/, "the newest notable is the row that misses out, not the older preference");
+
+  assert.equal(sectionOf(brief, "已推翻的"), "（无）", "no supersedes chain anywhere, so the section stays empty");
+  assert.doesNotMatch(sectionOf(brief, "已推翻的"), /工作区布局/, "a conflict kind alone never lands in superseded");
+});
+
+it("superseded lists a node only when it carries a real supersedes chain", async () => {
+  const root = await briefPreferenceWorkspace();
+  await writeNode(
+    root,
+    "digest/wiki/端口订正.md",
+    {
+      name: "端口订正",
+      description: "部署端口订正为 3000，旧值 8080 作废",
+      updated: "2026-11-11",
+      kind: "conflict",
+      supersedes: "digest/wiki/旧端口.md",
+    },
+    "端口以 3000 为准。",
+  );
+  const { ctx } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false, briefEnabled: true, briefBudget: 900, language: "zh" });
+  await settle();
+
+  const injected: any[] = [];
+  ctx.emit("agent/created", { agent: fakeAgent("session-brief-chain", injected) });
+  await settle();
+
+  assert.equal(injected.length, 2);
+  const brief = injected[1].content[0].text;
+
+  const superseded = sectionOf(brief, "已推翻的");
+  assert.match(superseded, /部署端口订正为 3000，旧值 8080 作废（digest\/wiki\/端口订正\.md，2026-11-11）/);
+  // Same kind, no chain: the workspace-layout conflict is a live correction,
+  // so it stays in about you rather than reading as an overturned conclusion.
+  assert.doesNotMatch(superseded, /工作区布局/, "kind: conflict without a chain is not superseded");
+  assert.match(sectionOf(brief, "关于你"), /工作区布局\.md/);
+});
+
+it("a tight budget sheds state rows first and about you keeps the preference", async () => {
+  const root = await briefPreferenceWorkspace();
+  const { ctx } = makeCtx(fakeSchedule());
+  apply(ctx as never, { workspace: root, dreamEnabled: false, briefEnabled: true, briefBudget: 400, language: "zh" });
+  await settle();
+
+  const injected: any[] = [];
+  ctx.emit("agent/created", { agent: fakeAgent("session-brief-floor", injected) });
+  await settle();
+
+  assert.equal(injected.length, 2);
+  const brief = injected[1].content[0].text;
+  assert.ok(brief.length <= 400, `within the 400-char budget, got ${brief.length}`);
+  assert.equal((brief.match(/^## /gm) ?? []).length, 5, "the skeleton never loses a heading");
+  assert.doesNotMatch(brief, /记忆建模/, "the budget eats the quietest state row before anything else");
+  const about = sectionOf(brief, "关于你");
+  assert.match(about, /饮食偏好\.md/, "about you keeps the declared preference once the budget bites");
+  assert.doesNotMatch(about, /^（无）$/, "the section floor keeps about you from emptying out");
 });
 
 it("an empty workspace still yields the five-section placeholder brief", async () => {
