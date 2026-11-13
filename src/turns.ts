@@ -37,6 +37,19 @@ export function textOf(data: any): string {
 }
 
 /**
+ * The source kind a message declares for itself, or null when it declares
+ * none. The Host stamps a real prompt `{ kind: "user" }`; harness-injected
+ * context — time samples, runtime snapshots, schedule reminders, skill and
+ * AGENTS.md instructions — each carries its own kind. No declaration means an
+ * older host that never stamped anything, which callers treat as human rather
+ * than risk dropping a real question (too much beats too little).
+ */
+export function sourceKindOf(message: unknown): string | null {
+  const kind = textOfRecord(textOfRecord(message)?.source)?.kind;
+  return typeof kind === "string" ? kind : null;
+}
+
+/**
  * Extract a capturable turn from a session event, tolerating payload shapes.
  */
 export function turnFromEvent(event: unknown): Turn | null {
@@ -66,7 +79,7 @@ export function turnFromEvent(event: unknown): Turn | null {
       : typeof messageTime === "string"
         ? messageTime
         : new Date().toISOString();
-  return { role, text, at };
+  return { role, text, at, sourceKind: sourceKindOf(message) };
 }
 
 /** One assistant reply held back from the daily page until its turn closes. */
@@ -121,13 +134,24 @@ export class TurnCapture {
     if (!turn) return; // tool calls and our own injections settle nothing
 
     if (turn.role === "user") {
-      // Settle first: on a host without turn/end this message is the only
-      // boundary left, and the staged reply answers the previous question —
-      // it must land on the page before this question does, even when both
-      // fall in the same minute.
-      await this.#settle(sessionId, () => true);
-      // The user's own words are the memory: journal and project, in full.
-      await this.#capture.record(sessionId, turn);
+      // Shaped like a user message is not the same as said by the user:
+      // harness-injected context (time samples, runtime snapshots, schedule
+      // reminders) journals as ground truth but is nobody's question, so it
+      // neither settles a staged reply nor reaches the daily page. An absent
+      // source means an older host — read it as human, too much beats too
+      // little.
+      const kind = turn.sourceKind ?? null;
+      const human = kind === null || kind === "user";
+      if (human) {
+        // Settle first: on a host without turn/end this message is the only
+        // boundary left, and the staged reply answers the previous question —
+        // it must land on the page before this question does, even when both
+        // fall in the same minute.
+        await this.#settle(sessionId, () => true);
+      }
+      // The journal is ground truth and takes everything, injections included.
+      await this.#capture.journal(sessionId, turn);
+      if (human) await this.#capture.project(sessionId, turn);
       return;
     }
 

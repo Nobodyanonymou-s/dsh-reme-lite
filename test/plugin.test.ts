@@ -427,14 +427,14 @@ it("turnFromEvent handles both message envelopes", () => {
     data: { content: [{ type: "text", text: "问" }] },
     time: "2026-10-25T00:00:00.000Z",
   });
-  assert.deepEqual(user, { role: "user", text: "问", at: "2026-10-25T00:00:00.000Z" });
+  assert.deepEqual(user, { role: "user", text: "问", at: "2026-10-25T00:00:00.000Z", sourceKind: null });
 
   const assistant = turnFromEvent({
     type: "assistant/message",
     data: { message: { content: [{ type: "text", text: "答" }] }, stream: [] },
     time: "2026-10-25T00:00:01.000Z",
   });
-  assert.deepEqual(assistant, { role: "assistant", text: "答", at: "2026-10-25T00:00:01.000Z" });
+  assert.deepEqual(assistant, { role: "assistant", text: "答", at: "2026-10-25T00:00:01.000Z", sourceKind: null });
 });
 
 it("working language follows the system unless pinned", () => {

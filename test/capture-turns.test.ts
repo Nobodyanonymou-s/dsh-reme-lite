@@ -60,7 +60,7 @@ async function dailyPage(root: string): Promise<string> {
   return readFile(join(dir, file), "utf8");
 }
 
-async function transcript(root: string): Promise<Array<{ role: string; text: string }>> {
+async function transcript(root: string): Promise<Array<{ role: string; text: string; source?: { kind?: string } }>> {
   const dir = join(root, "session", "dialog");
   const files = await readdir(dir);
   const file = files[0];
@@ -69,7 +69,7 @@ async function transcript(root: string): Promise<Array<{ role: string; text: str
   return raw
     .trim()
     .split("\n")
-    .map((line) => JSON.parse(line) as { role: string; text: string });
+    .map((line) => JSON.parse(line) as { role: string; text: string; source?: { kind?: string } });
 }
 
 it("a turn keeps the user's words and its final reply, not the narration", async () => {
@@ -218,4 +218,87 @@ it("flushAll settles the turn still in flight", async () => {
   const after = await dailyPage(root);
   assert.match(after, /结论：Y 周六发布/, "the shutdown write lands on the daily page");
   assert.equal(capture.pending, 0);
+});
+
+it("harness-injected context journals but never reaches the daily page", async () => {
+  const { root, capture, turns } = await harness();
+  const session = "session-9";
+  await turns.ingest(session, userMessage("真正的第一问", "2026-11-10T02:00:00.000Z"));
+  await turns.ingest(session, assistantMessage("先看 X 的配置", { turn: 1, step: 1, at: "2026-11-10T02:00:20.000Z" }));
+  // Injected between the steps of one turn: it is nobody's question, so it
+  // must not settle the staged step-1 narration onto the page either.
+  await turns.ingest(
+    session,
+    userMessage(
+      "Time sampled while preparing turn 1, step 2: 2026-11-10T10:00:30+08:00",
+      "2026-11-10T02:00:30.000Z",
+      { kind: "time-context" },
+    ),
+  );
+  await turns.ingest(session, assistantMessage("结论：X 周五发布", { turn: 1, step: 2, at: "2026-11-10T02:01:00.000Z" }));
+  await turns.ingest(session, turnEnd(1));
+  await turns.ingest(
+    session,
+    userMessage("Current runtime context. This snapshot supersedes the earlier one.", "2026-11-10T02:01:10.000Z", {
+      kind: "runtime-context",
+    }),
+  );
+  await turns.ingest(session, userMessage("[SCHEDULE REMINDER BATCH] 两条提醒已到期", "2026-11-10T02:01:20.000Z", { kind: "schedule" }));
+  await turns.ingest(session, userMessage("AGENTS.md 注入的协作守则", "2026-11-10T02:01:30.000Z", { kind: "agent-instructions" }));
+
+  const page = await dailyPage(root);
+  assert.match(page, /真正的第一问/);
+  assert.match(page, /结论：X 周五发布/);
+  assert.doesNotMatch(page, /先看 X 的配置/, "the mid-turn injection settled nothing");
+  for (const injected of [
+    "Time sampled while preparing",
+    "Current runtime context",
+    "[SCHEDULE REMINDER BATCH]",
+    "AGENTS.md 注入的协作守则",
+  ]) {
+    assert.ok(!page.includes(injected), `the ${injected} injection stays off the daily page`);
+  }
+
+  const lines = await transcript(root);
+  assert.deepEqual(
+    lines.map((line) => line.text),
+    [
+      "真正的第一问",
+      "先看 X 的配置",
+      "Time sampled while preparing turn 1, step 2: 2026-11-10T10:00:30+08:00",
+      "结论：X 周五发布",
+      "Current runtime context. This snapshot supersedes the earlier one.",
+      "[SCHEDULE REMINDER BATCH] 两条提醒已到期",
+      "AGENTS.md 注入的协作守则",
+    ],
+    "the journal is ground truth and keeps the injections",
+  );
+  assert.deepEqual(
+    lines.map((line) => line.source?.kind ?? null),
+    [null, null, "time-context", null, "runtime-context", "schedule", "agent-instructions"],
+    "each journaled injection carries its source kind",
+  );
+  assert.equal(capture.capturedTurns, 2, "only the human words and the final reply were projected");
+});
+
+it("a sourced human message and an unsourced one both reach both sinks", async () => {
+  const { root, capture, turns } = await harness();
+  const session = "session-10";
+  // The Host stamps a real prompt `{ kind: "user" }`.
+  await turns.ingest(session, userMessage("带 source 的问题", "2026-11-10T02:00:00.000Z", { kind: "user" }));
+  // Older hosts send no source at all: dropping it would drop real questions.
+  await turns.ingest(session, userMessage("没有 source 的旧问题", "2026-11-10T02:01:00.000Z"));
+  await turns.ingest(session, assistantMessage("两个都答了", { turn: 1, at: "2026-11-10T02:01:30.000Z" }));
+  await turns.ingest(session, turnEnd(1));
+
+  const page = await dailyPage(root);
+  assert.match(page, /带 source 的问题/);
+  assert.match(page, /没有 source 的旧问题/);
+  assert.match(page, /两个都答了/);
+
+  const lines = await transcript(root);
+  assert.deepEqual(lines.map((line) => line.text), ["带 source 的问题", "没有 source 的旧问题", "两个都答了"]);
+  assert.equal(lines[0]?.source?.kind, "user", "the human kind is journaled too");
+  assert.equal(lines[1]?.source, undefined, "a message without source journals without one");
+  assert.equal(capture.capturedTurns, 3);
 });
