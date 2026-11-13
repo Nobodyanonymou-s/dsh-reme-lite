@@ -254,6 +254,7 @@ it("turns are captured, plugin messages are not", async () => {
   await settle();
 
   const session = { id: "session-3", header: { id: "session-3" } };
+  ctx.emit("session/event", session, { type: "turn/start", data: { turn: 1 } });
   ctx.emit("session/event", session, {
     type: "user/message",
     data: { content: [{ type: "text", text: "部署窗口是周五下午四点" }] },
@@ -261,9 +262,15 @@ it("turns are captured, plugin messages are not", async () => {
   });
   ctx.emit("session/event", session, {
     type: "assistant/message",
-    data: { message: { content: [{ type: "text", text: "记下了" }] } },
+    data: { turn: 1, step: 1, message: { content: [{ type: "text", text: "我先看一下配置" }] } },
+    time: new Date("2026-10-25T02:00:30Z").toISOString(),
+  });
+  ctx.emit("session/event", session, {
+    type: "assistant/message",
+    data: { turn: 1, step: 2, message: { content: [{ type: "text", text: "记下了" }] } },
     time: new Date("2026-10-25T02:01:00Z").toISOString(),
   });
+  ctx.emit("session/event", session, { type: "turn/end", data: { turn: 1, reason: "stop" } });
   ctx.emit("session/event", session, {
     type: "user/message",
     data: {
@@ -281,7 +288,21 @@ it("turns are captured, plugin messages are not", async () => {
   const text = await readFile(join(dir, written), "utf8");
   assert.match(text, /部署窗口是周五下午四点/);
   assert.match(text, /记下了/, "assistant text lives under data.message");
+  assert.match(text, /我先看一下配置/, "the transcript keeps mid-turn narration");
   assert.doesNotMatch(text, /插件注入的守则/);
+
+  // The daily page is the salient slice: the user's words and the turn's final
+  // reply, nothing else.
+  const dailyDir = join(root, "daily");
+  const pages = await readdir(dailyDir);
+  assert.equal(pages.length, 1);
+  const page = pages[0];
+  assert.ok(page, "one daily page was written");
+  const daily = await readFile(join(dailyDir, page), "utf8");
+  assert.match(daily, /\*\*user\*\*: 部署窗口是周五下午四点/);
+  assert.match(daily, /\*\*assistant\*\*: 记下了/);
+  assert.doesNotMatch(daily, /我先看一下配置/, "mid-turn narration stays off the page");
+  assert.doesNotMatch(daily, /插件注入的守则/);
 });
 
 it("memory_search returns line-ranged evidence for written nodes", async () => {
