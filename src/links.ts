@@ -160,6 +160,10 @@ export function renderIndexPage(store: MemoryStore, options: { now?: Date } = {}
     "---",
     "",
     "本页是生成的指针页，正文节点不要复制这里的内容。",
+    // Two trailing empties leave a blank line between the head and the first
+    // `## section` (and before the `- (none)` placeholder), so the generated
+    // file reads cleanly; `head.length` keeps the newline inside the cap budget.
+    "",
     "",
   ].join("\n");
   if (!nodes.length) return `${head}- (none)\n`;
