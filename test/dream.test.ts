@@ -75,6 +75,13 @@ async function dialogWorkspace(): Promise<{ store: MemoryStore; long: string }> 
     { role: "assistant", text: "[[node-memory:dream]] 长期记忆索引已更新。", minutesAgo: 27 },
     { role: "assistant", text: "# 长期记忆\n- 部署端口 8443", minutesAgo: 26 },
     { role: "assistant", text: "记忆已写入。", minutesAgo: 25, source: { kind: "node-memory" } },
+    // Harness-injected context rides in the journal shaped like a user turn.
+    {
+      role: "user",
+      text: "Current runtime context. This snapshot supersedes the earlier one.",
+      minutesAgo: 20,
+      source: { kind: "runtime-context" },
+    },
     { role: "user", text: "再确认一下端口。", minutesAgo: 10 },
     { role: "assistant", text: long, minutesAgo: 9 },
     // Older than the default window: must stay out.
@@ -103,11 +110,41 @@ it("material carries recent transcripts for reconciliation", async () => {
   assert.ok(!section.includes("# 长期记忆"));
   assert.ok(!section.includes("记忆已写入。"));
 
+  // Harness-injected context is not the user's words either: it journals, but
+  // a time sample or a snapshot must not be reconciled as if anyone said it.
+  assert.ok(!section.includes("Current runtime context"), "the injected user line stays out of the material");
+  assert.ok(section.includes("把部署端口改成 8443。"), "the human questions around it are untouched");
+
   // One long reply is trimmed to the cap; the user's words never are.
   assert.ok(section.includes(`${long.slice(0, 300)}…`));
   assert.ok(!section.includes(long));
 
   assert.ok(section.length <= TRANSCRIPT_BUDGET, `transcript block must stay within budget, got ${section.length}`);
+});
+
+it("harness-injected user lines never read as something anyone said", async () => {
+  const { root, store } = await workspace();
+  await writeDialog(root, [
+    { role: "user", text: "把超时改成 30 秒。", minutesAgo: 30 },
+    { role: "assistant", text: "已把超时改为 30 秒。", minutesAgo: 29 },
+    // Harness injections shaped like user turns — the two kinds the field
+    // evidence showed landing in the journal.
+    {
+      role: "user",
+      text: "Time sampled while preparing turn 2, step 1: 2026-11-13T22:55:34+08:00",
+      minutesAgo: 20,
+      source: { kind: "time-context" },
+    },
+    { role: "user", text: "[SCHEDULE REMINDER BATCH] 两条提醒已到期", minutesAgo: 19, source: { kind: "schedule" } },
+    { role: "user", text: "再确认一下超时。", minutesAgo: 10 },
+    { role: "assistant", text: "超时仍是 30 秒。", minutesAgo: 9 },
+  ]);
+  const section = transcriptSlice(await buildDreamMaterial({ store }));
+
+  assert.ok(!section.includes("Time sampled while preparing"), "the time sample stays out of the material");
+  assert.ok(!section.includes("[SCHEDULE REMINDER BATCH]"), "the schedule reminder stays out too");
+  assert.ok(section.includes("把超时改成 30 秒。") && section.includes("再确认一下超时。"), "the human questions around them are untouched");
+  assert.ok(section.includes("超时仍是 30 秒。"), "and so are their conclusions");
 });
 
 it("a workspace without transcripts degrades to (none)", async () => {

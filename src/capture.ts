@@ -22,6 +22,15 @@ export interface Turn {
   role: "user" | "assistant";
   text: string;
   at: string;
+  /**
+   * The message's own source declaration, when it carried one. The Host stamps
+   * real prompts `{ kind: "user" }` and harness-injected context (time samples,
+   * runtime snapshots, schedule reminders) with its own kinds; no source at all
+   * means an older host. The journal persists it so the transcript readers can
+   * tell the two apart; the daily projection ignores it — callers decide who is
+   * human before they project.
+   */
+  sourceKind?: string | null;
 }
 
 export function shortHash(value: string): string {
@@ -86,9 +95,13 @@ export class Capture {
 
     const file = join(this.root, "session", "dialog", dialogFileName(sessionId));
     await mkdir(join(this.root, "session", "dialog"), { recursive: true });
+    // The source kind rides along when known: without it a transcript reader
+    // cannot tell the user's words from harness-injected context, and the two
+    // must not be reconciled the same way.
+    const source = turn.sourceKind ? { source: { kind: turn.sourceKind } } : {};
     await appendFile(
       file,
-      `${JSON.stringify({ session_id: sessionId, role: turn.role, at: turn.at, text })}\n`,
+      `${JSON.stringify({ session_id: sessionId, role: turn.role, at: turn.at, text, ...source })}\n`,
       "utf8",
     );
     return true;

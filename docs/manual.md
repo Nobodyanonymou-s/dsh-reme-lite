@@ -63,7 +63,7 @@
 
 ## 捕获与对账（0.5.0 的行为变化）
 
-- **daily 摘录块变短是预期，不是丢了数据。** 捕获按轮次进行：`session/dialog/*.jsonl` 仍全量转录（含模型中间旁白与被中断的半截答复），但 `daily/` 的 auto 块只记用户原话与每轮**最终答复**——中间旁白不再进 daily，需要时去 transcript 里找。
+- **daily 摘录块变短是预期，不是丢了数据。** 捕获按轮次进行：`session/dialog/*.jsonl` 仍全量转录（含模型中间旁白与被中断的半截答复），但 `daily/` 的 auto 块只记用户原话与每轮**最终答复**——中间旁白不再进 daily，需要时去 transcript 里找。用户原话也不含 harness 注入的上下文消息（时间/运行时快照/计划提醒等，它们的 `source.kind` 不是 `user`；没有 source 的旧消息仍视为用户原话）。
 - **`memory_dream` 的材料带近 3 天 transcript 原文**（默认 12000 字符硬上限，超预算时最新优先、单条裁剪）。这是给整理者核对旧笔记的地面真值。**隐私边界**：这段原文只出现在 `memory_dream` 的返回里——不进检索索引、不进 `/node-memory/status.json`、不会被写进 digest 节点。
 - **`memory_dream` 每次调用都会重生成 `digest/index.md`（digest 节点的指针页）与 `metadata/links.json`（断链图）**。两者都是派生数据：可删、可重建、不写任何正文节点；删掉后下一次调用 `memory_dream` 就会补回来。
 

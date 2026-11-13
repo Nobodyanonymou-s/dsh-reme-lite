@@ -3,6 +3,15 @@ interface Turn {
   role: "user" | "assistant";
   text: string;
   at: string;
+  /**
+   * The message's own source declaration, when it carried one. The Host stamps
+   * real prompts `{ kind: "user" }` and harness-injected context (time samples,
+   * runtime snapshots, schedule reminders) with its own kinds; no source at all
+   * means an older host. The journal persists it so the transcript readers can
+   * tell the two apart; the daily projection ignores it — callers decide who is
+   * human before they project.
+   */
+  sourceKind?: string | null;
 }
 /**
  * Extract a capturable turn from a session event, tolerating payload shapes.

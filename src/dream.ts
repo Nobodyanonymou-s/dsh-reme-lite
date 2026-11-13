@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { buildLinkGraph, candidatePaths, digestNodes, nearDuplicates } from "./links.ts";
 import type { LinkGraph, DuplicatePair } from "./links.ts";
 import type { MemoryStore } from "./store.ts";
-import { SOURCE } from "./turns.ts";
+import { SOURCE, sourceKindOf } from "./turns.ts";
 
 export type Language = "zh" | "en";
 
@@ -222,6 +222,13 @@ async function readDialog(dir: string, range: { now: number; days: number }): Pr
       const text = typeof record.text === "string" && record.text.trim() ? record.text : null;
       if (!role || !text) continue;
       if (isOwnInjection(record, text)) continue;
+      // A journaled user line with a non-user source kind is harness-injected
+      // context, not something anyone said: reconciling against it would treat
+      // a time sample or a schedule reminder as the user's words. Lines with
+      // no source at all predate the field — keep those, losing a real
+      // question is worse than showing an ambiguous one.
+      const kind = sourceKindOf(record);
+      if (role === "user" && kind !== null && kind !== "user") continue;
       const time = Date.parse(typeof record.at === "string" ? record.at : "");
       if (!Number.isFinite(time)) continue;
       if (range.now - time >= range.days * DAY_MS) continue;
